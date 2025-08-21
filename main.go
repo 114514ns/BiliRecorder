@@ -3,15 +3,19 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"github.com/114514ns/BiliClient"
-	"github.com/bytedance/sonic"
+	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/114514ns/BiliClient"
+	"github.com/bytedance/sonic"
 )
 
 //TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
@@ -23,6 +27,7 @@ type RoomConfig struct {
 	Encoder         string //编码器
 	PreferEncoding  string //从b站首选的流
 	EncodeChunkTime int    //每块到多大的时候开始编码
+	KeepTemp        bool
 }
 
 func GetLiveStream(client *bili.BiliClient, room int) string {
@@ -36,6 +41,10 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 	var count = 0
 	var stream = GetLiveStream(client, room)
 	log.Println("Stream: " + stream)
+	_, err := os.Stat("temp")
+	if os.IsNotExist(err) {
+		os.Mkdir("temp", os.ModePerm)
+	}
 	var ticker = time.NewTicker(time.Second * 2)
 	var dst, _ = os.Create(dst0)
 	writer := bufio.NewWriter(dst)
@@ -44,10 +53,55 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 	var u, _ = url.Parse(stream)
 	w := bufio.NewWriter(dst)
 	defer ticker.Stop()
+	done := make(chan bool, 1)
+	sigs := make(chan os.Signal, 1)
+	go func() {
+		<-sigs
+		if config.ReEncoding { //按下ctrl-c的时候，如果启用了重新编码，就合并所有分片
+			var content = ""
+			dir, _ := ioutil.ReadDir("temp")
+			for _, info := range dir {
+				var name = "temp/" + info.Name()
+				if strings.Contains(name, "-code.mp4") {
+					content += fmt.Sprintf("file '%s'\n", name)
+				}
+			}
+			os.WriteFile("list.txt", []byte(content), 0644)
+			cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", dst0)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Run()
+		}
+		os.Exit(0)
+	}()
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	for {
 		select {
+		case <-done:
+			return
 		case <-ticker.C:
-			str, _ := client.Resty.R().Get(stream)
+			str, err := client.Resty.R().Get(stream)
+			if err != nil {
+				if config.ReEncoding {
+					//直播结束，如果启用了重新编码，就合并所有分片
+					fmt.Println(err)
+					dir, _ := ioutil.ReadDir("temp")
+					var content = ""
+					for _, info := range dir {
+						var name = "temp/" + info.Name()
+						if strings.Contains(name, "-code.mp4") {
+							content += fmt.Sprintf("file '%s'\n", name)
+						}
+					}
+					os.WriteFile("list.txt", []byte(content), 0644)
+					cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", dst0)
+					cmd.Stdout = os.Stdout
+					cmd.Stderr = os.Stderr
+					cmd.Run()
+					done <- true
+				}
+
+			}
 			for _, s := range strings.Split(str.String(), "\n") {
 				if !strings.HasPrefix(s, "#") {
 					_, ok := m[s]
@@ -65,27 +119,13 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 						if config.ReEncoding {
 							if count%config.EncodeChunkTime == 0 {
 								go func() {
-									command := exec.Command("ffmpeg", "-i", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+".mp4", "-vcodec", config.Encoder /*"-b:v", "5000k", */, "-c:a", "copy", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+"-code.mp4")
+									command := exec.Command("ffmpeg", "-i", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+".mp4", "-g", "60", "-vcodec", config.Encoder /*"-b:v", "5000k", */, "-c:a", "copy", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+"-code.mp4")
 									//command.Stderr = os.Stderr
 									//command.Stdout = os.Stdout
 									command.Run()
-									if count/config.EncodeChunkTime == 1 {
-										dst.Close()
-										os.Remove(dst0)
-										err := os.Rename("temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+"-code.mp4", dst0)
-										if err != nil {
-											fmt.Println(err)
-										}
-									} else {
-										listContent := fmt.Sprintf("file '%s'\nfile '%s'\n", dst0, "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+"-code.mp4")
-										os.WriteFile("list.txt", []byte(listContent), 0644)
-										cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", dst0)
-										cmd.Stdout = os.Stdout
-										cmd.Stderr = os.Stderr
-										cmd.Run()
-										//os.Remove("temp/" + strconv.Itoa(count/config.EncodeChunkTime-1) + "-code.ts")
+									if !config.KeepTemp {
+										os.Remove("temp/" + strconv.Itoa(count/config.EncodeChunkTime-1) + ".mp4")
 									}
-
 								}()
 							}
 							var chunk = count / config.EncodeChunkTime
@@ -100,6 +140,7 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 							w.Flush()
 
 						} else {
+							//没有启用重新编码，直接写入目标文件
 							writer.Write(r.Body())
 							writer.Flush()
 						}
@@ -113,17 +154,19 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 }
 
 func main() {
+	//ffmpeg is required
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
-	var client = bili.NewClient("", bili.ClientOptions{})
-	TraceStream(client, 1883943131, "out.mp4", RoomConfig{
+	file, _ := os.ReadFile("cookie.txt")
+	var client = bili.NewClient(string(file), bili.ClientOptions{})
+	TraceStream(client, 2058234, "out.mp4", RoomConfig{
+		KeepTemp:   false,
 		ReEncoding: true,
-		//Encoder:         "hevc_qsv",
+		Encoder:    "hevc_qsv",
 		//Encoder: "hevc_amf",
-		Encoder: "libsvtav1",
+		//Encoder: "libsvtav1",
 		//Encoder:         "hevc_qsv",
 		//Encoder:         "av1_amf",
 		//Encoder:         "av1_nvenc",
-		PreferEncoding:  "avc",
 		EncodeChunkTime: 15,
 	})
 }

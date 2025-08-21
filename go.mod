@@ -3,12 +3,16 @@ module BiliRecorder
 go 1.24.5
 
 require (
-	github.com/114514ns/BiliClient v0.0.0-20250819050221-c5659439fe09 // indirect
+	github.com/114514ns/BiliClient v0.0.0-20250820123435-f0dfcb3cfdf2
+	github.com/bytedance/sonic v1.14.0
+	github.com/google/uuid v1.6.0
+)
+
+require (
 	github.com/PuerkitoBio/goquery v1.10.3 // indirect
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/bufbuild/protocompile v0.14.1 // indirect
-	github.com/bytedance/sonic v1.14.0 // indirect
 	github.com/bytedance/sonic/loader v0.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/go-resty/resty/v2 v2.16.5 // indirect
