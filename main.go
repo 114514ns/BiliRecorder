@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -18,16 +19,48 @@ import (
 	"github.com/bytedance/sonic"
 )
 
-//TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
+// TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
 // the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
-
+type LocalStorageConfig struct {
+	Type     string
+	Location string //本地存储
+}
+type AlistStorageConfig struct {
+	Type    string
+	User    string //Alist
+	Pass    string
+	RootDir string
+}
+type CMStorageConfig struct {
+	Type    string
+	Auth    string //移动网盘，支持边录边传
+	RootDir string
+}
+type S3StorageConfig struct {
+	Type    string
+	User    string //S3，支持边录边传,不过成本太高，也许不会实现，先占个位
+	Pass    string
+	RootDir string
+}
 type RoomConfig struct {
 	OnlyAudio       bool   //仅音频
 	ReEncoding      bool   //重新编码
 	Encoder         string //编码器
 	PreferEncoding  string //从b站首选的流
 	EncodeChunkTime int    //每块到多大的时候开始编码
-	KeepTemp        bool
+	KeepTemp        bool   //保留分片，调试用
+	Dst             interface{}
+	EnableSTT       bool
+	STTEndpoint     string
+	STTAuth         string
+	ChatEndPoint    string
+	Model           string
+}
+type Config struct {
+	GlobalConfig   RoomConfig
+	OverrideConfig map[string]RoomConfig
+	Rooms          []int
+	Port           int //api端口
 }
 
 func GetLiveStream(client *bili.BiliClient, room int) string {
@@ -81,7 +114,7 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 			return
 		case <-ticker.C:
 			str, err := client.Resty.R().Get(stream)
-			if err != nil {
+			if err != nil || str.StatusCode() != 200 {
 				if config.ReEncoding {
 					//直播结束，如果启用了重新编码，就合并所有分片
 					fmt.Println(err)
@@ -116,15 +149,51 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 						}
 						r, _ := client.Resty.R().Get("https://" + u.Host + d + s)
 						count++
-						if config.ReEncoding {
+						if config.ReEncoding { //如果启用了重新编码
 							if count%config.EncodeChunkTime == 0 {
 								go func() {
-									command := exec.Command("ffmpeg", "-i", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+".mp4", "-g", "60", "-vcodec", config.Encoder /*"-b:v", "5000k", */, "-c:a", "copy", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+"-code.mp4")
+									var fileName = "temp/" + strconv.Itoa(count/config.EncodeChunkTime-1) + "-code.mp4"
+									command := exec.Command("ffmpeg", "-i", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+".mp4", "-g", "60", "-vcodec", config.Encoder /*"-b:v", "5000k", */, "-c:a", "copy", fileName)
 									//command.Stderr = os.Stderr
 									//command.Stdout = os.Stdout
 									command.Run()
+									if config.EnableSTT {
+										go func() {
+											exec.Command("ffmpeg", "-y", "-i", fileName, "tmp.mp3").Run()
+											res, err := client.Resty.R().SetHeader("Authorization", "Bearer "+config.STTAuth).SetFile("file", "tmp.mp3").SetFormData(map[string]string{"model": "gpt-4o-transcribe"}).Post(config.STTEndpoint)
+											if err != nil {
+												fmt.Println(err)
+											} else {
+												var obj map[string]string
+												json.Unmarshal(res.Body(), &obj)
+												var text = obj["text"]
+												var j = fmt.Sprintf(`
+{"model": "%s","stream":false,"messages": [{"role": "user","content": "我给你发一段文本，来源于b站直播的文本转录，你需要帮我给下面的文本加上标点符号，并修复可能出现的识别错误,只需给我修正后的内容，不要包含其他文本。%s"}]}`, config.Model, text)
+												res, err = client.Resty.R().SetHeader("Authorization", "Bearer "+config.STTAuth).SetHeader("Content-Type", "application/json").SetBody([]byte(j)).Post(config.ChatEndPoint)
+												type Response struct {
+													Choices []struct {
+														Message struct {
+															Content string `json:"content"`
+														} `json:"message"`
+													} `json:"choices"`
+												}
+												if err != nil {
+													fmt.Println(err)
+												} else {
+													var obj Response
+													json.Unmarshal(res.Body(), &obj)
+													fmt.Println(obj.Choices[0].Message.Content)
+												}
+											}
+											if !config.KeepTemp {
+												os.Remove("tmp.mp3")
+											}
+										}()
+
+									}
 									if !config.KeepTemp {
 										os.Remove("temp/" + strconv.Itoa(count/config.EncodeChunkTime-1) + ".mp4")
+
 									}
 								}()
 							}
@@ -158,8 +227,8 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
 	file, _ := os.ReadFile("cookie.txt")
 	var client = bili.NewClient(string(file), bili.ClientOptions{})
-	TraceStream(client, 2058234, "out.mp4", RoomConfig{
-		KeepTemp:   false,
+	TraceStream(client, 23375552, "out.mp4", RoomConfig{
+		KeepTemp:   true,
 		ReEncoding: true,
 		Encoder:    "hevc_qsv",
 		//Encoder: "hevc_amf",
@@ -167,6 +236,11 @@ func main() {
 		//Encoder:         "hevc_qsv",
 		//Encoder:         "av1_amf",
 		//Encoder:         "av1_nvenc",
-		EncodeChunkTime: 15,
+		EncodeChunkTime: 60,
+		EnableSTT:       false,
+		STTEndpoint:     "https://jeniya.cn/v1/audio/transcriptions",
+		STTAuth:         "sk",
+		ChatEndPoint:    "http://jeniya.cn/v1/chat/completions",
+		Model:           "deepseek-v3-250324",
 	})
 }
