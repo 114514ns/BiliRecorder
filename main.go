@@ -3,91 +3,214 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
-	"github.com/114514ns/BiliClient"
-	"github.com/bytedance/sonic"
+	bili "github.com/114514ns/BiliClient"
+	"github.com/go-resty/resty/v2"
+	"github.com/google/uuid"
+	"github.com/robfig/cron/v3"
 )
 
-// TIP <p>To run your code, right-click the code and select <b>Run</b>.</p> <p>Alternatively, click
-// the <icon src="AllIcons.Actions.Execute"/> icon in the gutter and select the <b>Run</b> menu item from here.</p>
-type LocalStorageConfig struct {
-	Type     string
-	Location string //本地存储
-}
-type AlistStorageConfig struct {
-	Type    string
-	User    string //Alist
-	Pass    string
-	RootDir string
-}
-type CMStorageConfig struct {
-	Type    string
-	Auth    string //移动网盘，支持边录边传
-	RootDir string
-}
-type S3StorageConfig struct {
-	Type    string
-	User    string //S3，支持边录边传,不过成本太高，也许不会实现，先占个位
-	Pass    string
-	RootDir string
-}
-type RoomConfig struct {
-	OnlyAudio       bool   //仅音频
-	ReEncoding      bool   //重新编码
-	Encoder         string //编码器
-	PreferEncoding  string //从b站首选的流
-	EncodeChunkTime int    //每块到多大的时候开始编码
-	KeepTemp        bool   //保留分片，调试用
-	Dst             interface{}
-	EnableSTT       bool
-	STTEndpoint     string
-	STTAuth         string
-	ChatEndPoint    string
-	Model           string
-}
-type Config struct {
-	GlobalConfig   RoomConfig
-	OverrideConfig map[string]RoomConfig
-	Rooms          []int
-	Port           int //api端口
+func initResty() {
+	client.OnBeforeRequest(func(c *resty.Client, request *resty.Request) error {
+		request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+		if strings.Contains(request.URL, "bilibili.com") {
+			request.Header.Set("Cookie", "buvid3="+uuid.New().String()+"infoc")
+		}
+		return nil
+	})
+
+	client.OnAfterResponse(func(c *resty.Client, response *resty.Response) error {
+		if response.StatusCode() > 299 && response.StatusCode() != 404 {
+			log.Println(response.StatusCode())
+			log.Println(response.String())
+			log.Println(response.Request.URL)
+			debug.PrintStack()
+		}
+		return nil
+	})
 }
 
-func GetLiveStream(client *bili.BiliClient, room int) string {
-	res, _ := client.Resty.R().Get(fmt.Sprintf("https://api.live.bilibili.com/room/v1/Room/playUrl?cid=%d&qn=10000&platform=h5", room))
-	var obj = make(map[string]interface{})
-	sonic.Unmarshal(res.Body(), &obj)
+func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
+	var typo = config.Dst.(Storage).Type()
+	var stream = biliDirectClient.GetLiveStream(room, true)
 
-	return obj["data"].(map[string]interface{})["durl"].([]interface{})[0].(map[string]interface{})["url"].(string)
+	log.Printf("[%s ]Audio Stream: %v\n", live.UName, stream)
+
+	var ext = ".flv"
+
+	resp, err := client.R().
+		SetDoNotParseResponse(true).
+		Get(stream)
+	if err != nil {
+		log.Printf("请求失败: %v\n", err)
+		return
+	}
+	defer resp.RawBody().Close()
+
+	var w *bufio.Writer
+
+	var bytes int64 = 0
+
+	buffer := make([]byte, 1024*1024)
+
+	oneDriveId := ""
+	oneDriveUrl := ""
+
+	oneDriveChunk := 1
+
+	if typo == "onedrive" {
+
+		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, live.UName)
+		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-"))
+		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
+
+	}
+	if typo == "local" {
+		var dst, _ = CreateFile(config.Dst.(*LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.String(), ":", "-") + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
+		w = bufio.NewWriter(dst)
+	}
+
+	for {
+		n, err := io.ReadFull(resp.RawBody(), buffer)
+		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
+			if n > 0 {
+				if typo == "onedrive" {
+					oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize, oneDrive.AudioChunkSize, oneDriveUrl, make([]byte, 16))
+				}
+				if typo == "local" {
+					w.Write(buffer[:n])
+					w.Flush()
+
+				}
+			}
+			break
+		} else if err != nil {
+			log.Printf("读取流失败: %v\n", err)
+		}
+
+		if typo == "local" {
+			w.Write(buffer[:n])
+			w.Flush()
+		}
+		if typo == "onedrive" {
+			if oneDrive.ChunkSize-bytes <= 1024*1024*5 {
+				oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n])
+				oneDriveChunk++
+				oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
+				bytes = 0
+			} else {
+				oneDriveUpload(oneDrive, bytes, bytes+int64(n), oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n])
+				bytes = bytes + int64(n)
+			}
+		}
+
+	}
+
 }
-func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConfig) {
+func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig) {
+
+	var live Live
+
+	var ext = ".mp4"
+	var obj interface{}
+	res, _ := client.R().Get("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=" + toString(int64(room)))
+	json.Unmarshal(res.Body(), &obj)
+	var uid = getInt64(obj, "data.uid")
+	var begin = getString(obj, "data.live_time")
+	var title = getString(obj, "data.title")
+	var cover = getString(obj, "data.user_cover")
+	res, _ = client.R().Get("https://api.live.bilibili.com/xlive/custom-activity-interface/baseActivity/GeneralGetUserInfo?uids=" + toString(uid))
+	json.Unmarshal(res.Body(), &obj)
+	var uname = getString(obj, "data.data."+toString(uid)+".uname")
 	var count = 0
-	var stream = GetLiveStream(client, room)
-	log.Println("Stream: " + stream)
+	var stream = biliClient.GetLiveStream(room, false)
+	var dstType = config.Dst.(Storage).Type()
+	log.Printf("[%s ]Video Stream: \n"+stream, uname)
 	_, err := os.Stat("temp")
 	if os.IsNotExist(err) {
 		os.Mkdir("temp", os.ModePerm)
 	}
 	var ticker = time.NewTicker(time.Second * 2)
-	var dst, _ = os.Create(dst0)
-	writer := bufio.NewWriter(dst)
-	var m = make(map[string]bool)
-	//var m = make(map[string]bool)
+
+	var m0 = make(map[string]bool)
+
+	var oneDriveChunk = 1 //OneDrive分片，分了多少个
 	var u, _ = url.Parse(stream)
-	w := bufio.NewWriter(dst)
+
 	defer ticker.Stop()
 	done := make(chan bool, 1)
 	sigs := make(chan os.Signal, 1)
+	var oneDriveId = ""
+	var token = ""
+
+	log.Printf("[%s] Living\n", uname)
+
+	live.UName = uname
+	live.UID = uid
+	live.Title = title
+	live.Time, _ = time.Parse(time.DateTime, begin)
+	live.Cover = cover
+
+	mutex.Lock()
+
+	r := m[room]
+	r.Room = room
+	r.Title = title
+	r.UName = uname
+	r.UID = uid
+	r.Live = live.Time
+	r.Record = time.Now()
+
+	mutex.Unlock()
+
+	var dst, _ = os.Create("")
+	if dstType == "local" {
+		dst, _ = os.Create(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.String(), ":", "-") + "/" + title + "." + ext)
+	}
+
+	w := bufio.NewWriter(dst)
+	defer func() {
+		log.Printf("[%s] Exit\n", uname)
+		mutex.Lock()
+		delete(m0, uname)
+		mutex.Unlock()
+	}()
+
+	var bytes int64 = 0  //用于标记OneDrive上传的字节数
+	var oneDriveUrl = "" //OneDrive上传url
+	pr, pw := io.Pipe()  //用于上传到Alist
+	if dstType == "alist" {
+		token = alistGetToken(config.Dst.(AlistStorageConfig))
+	}
+	if !(dstType == "alist") {
+		pw.Close()
+		pr.Close()
+	}
+
+	if dstType == "onedrive" {
+
+		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, uname)
+		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(begin, ":", "-"))
+		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+	}
+	go func() {
+		TraceAudio(client, room, config, live)
+	}()
 	go func() {
 		<-sigs
 		if config.ReEncoding { //按下ctrl-c的时候，如果启用了重新编码，就合并所有分片
@@ -107,13 +230,34 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 		}
 		os.Exit(0)
 	}()
+	go func() {
+		for {
+			time.Sleep(time.Minute * 10)
+			stream = biliClient.GetLiveStream(room, false)
+		}
+	}()
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		if config.Dst.(Storage).Type() == "alist" {
+			alistUploadFile(pr, "Microsoft365/小雾uya.mp4", token, config.Dst.(AlistStorageConfig).Server)
+		}
+	}()
 	for {
 		select {
 		case <-done:
 			return
 		case <-ticker.C:
-			str, err := client.Resty.R().Get(stream)
+			str, err := biliClient.Resty.R().Get(stream)
+			var retry = 3
+			for {
+				if str.StatusCode() != 200 && retry > 0 {
+					stream = biliClient.GetLiveStream(room, false)
+					str, err = client.R().Get(stream)
+					retry--
+				} else {
+					break
+				}
+			}
 			if err != nil || str.StatusCode() != 200 {
 				if config.ReEncoding {
 					//直播结束，如果启用了重新编码，就合并所有分片
@@ -131,13 +275,19 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 					cmd.Stdout = os.Stdout
 					cmd.Stderr = os.Stderr
 					cmd.Run()
-					done <- true
 				}
-
+				if config.Dst.(Storage).Type() == "alist" {
+					pw.Close()
+				}
+				if config.Dst.(Storage).Type() == "onedrive" {
+					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
+				}
+				return
 			}
+
 			for _, s := range strings.Split(str.String(), "\n") {
 				if !strings.HasPrefix(s, "#") {
-					_, ok := m[s]
+					_, ok := m0[s]
 					if !ok {
 						path := u.Path
 						split := strings.Split(path, "/")
@@ -147,74 +297,46 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 								d += s2 + "/"
 							}
 						}
-						r, _ := client.Resty.R().Get("https://" + u.Host + d + s)
+						r, err1 := client.R().Get("https://" + u.Host + d + s)
+						if err1 != nil {
+							log.Println(err1)
+						}
 						count++
 						if config.ReEncoding { //如果启用了重新编码
-							if count%config.EncodeChunkTime == 0 {
-								go func() {
-									var fileName = "temp/" + strconv.Itoa(count/config.EncodeChunkTime-1) + "-code.mp4"
-									command := exec.Command("ffmpeg", "-i", "temp/"+strconv.Itoa(count/config.EncodeChunkTime-1)+".mp4", "-g", "60", "-vcodec", config.Encoder /*"-b:v", "5000k", */, "-c:a", "copy", fileName)
-									//command.Stderr = os.Stderr
-									//command.Stdout = os.Stdout
-									command.Run()
-									if config.EnableSTT {
-										go func() {
-											exec.Command("ffmpeg", "-y", "-i", fileName, "tmp.mp3").Run()
-											res, err := client.Resty.R().SetHeader("Authorization", "Bearer "+config.STTAuth).SetFile("file", "tmp.mp3").SetFormData(map[string]string{"model": "gpt-4o-transcribe"}).Post(config.STTEndpoint)
-											if err != nil {
-												fmt.Println(err)
-											} else {
-												var obj map[string]string
-												json.Unmarshal(res.Body(), &obj)
-												var text = obj["text"]
-												var j = fmt.Sprintf(`
-{"model": "%s","stream":false,"messages": [{"role": "user","content": "我给你发一段文本，来源于b站直播的文本转录，你需要帮我给下面的文本加上标点符号，并修复可能出现的识别错误,只需给我修正后的内容，不要包含其他文本。%s"}]}`, config.Model, text)
-												res, err = client.Resty.R().SetHeader("Authorization", "Bearer "+config.STTAuth).SetHeader("Content-Type", "application/json").SetBody([]byte(j)).Post(config.ChatEndPoint)
-												type Response struct {
-													Choices []struct {
-														Message struct {
-															Content string `json:"content"`
-														} `json:"message"`
-													} `json:"choices"`
-												}
-												if err != nil {
-													fmt.Println(err)
-												} else {
-													var obj Response
-													json.Unmarshal(res.Body(), &obj)
-													fmt.Println(obj.Choices[0].Message.Content)
-												}
-											}
-											if !config.KeepTemp {
-												os.Remove("tmp.mp3")
-											}
-										}()
-
-									}
-									if !config.KeepTemp {
-										os.Remove("temp/" + strconv.Itoa(count/config.EncodeChunkTime-1) + ".mp4")
-
-									}
-								}()
-							}
-							var chunk = count / config.EncodeChunkTime
-							name := "temp/" + strconv.Itoa(chunk) + ".mp4"
-							_, err := os.Stat(name)
-							if err != nil {
-								os.Create(name)
-								var f, _ = os.Create(name)
-								w = bufio.NewWriter(f)
-							}
 							w.Write(r.Body())
 							w.Flush()
 
 						} else {
-							//没有启用重新编码，直接写入目标文件
-							writer.Write(r.Body())
-							writer.Flush()
+							if config.Dst.(Storage).Type() == "local" {
+								var chunk = count / config.ChunkTime
+								name := "temp/" + strconv.Itoa(chunk) + ".mp4"
+								_, err := os.Stat(name)
+								if err != nil {
+									os.Create(name)
+									var f, _ = os.Create(name)
+									w = bufio.NewWriter(f)
+								}
+								w.Write(r.Body())
+								w.Flush()
+							}
+							if config.Dst.(Storage).Type() == "alist" {
+								pw.Write(r.Body())
+							}
+							if dstType == "onedrive" {
+								if oneDrive.ChunkSize-bytes <= 1024*1024*10 {
+									oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize-1, oneDrive.ChunkSize, oneDriveUrl, r.Body())
+									oneDriveChunk++
+									oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+									bytes = 0
+									fmt.Println("end")
+								} else {
+									oneDriveUpload(oneDrive, bytes, bytes+int64(len(r.Body())), oneDrive.ChunkSize, oneDriveUrl, r.Body())
+									bytes = bytes + int64(len(r.Body()))
+								}
+							}
 						}
 
-						m[s] = true
+						m0[s] = true
 					}
 				}
 			}
@@ -222,25 +344,111 @@ func TraceStream(client *bili.BiliClient, room int, dst0 string, config RoomConf
 	}
 }
 
+var m = make(map[int]*RoomStatus)
+
+var mutex sync.Mutex
+
+func RefreshStatus(id []int64) {
+	var s = "https://api.live.bilibili.com/xlive/fuxi-interface/UserService/getUserInfo?_ts_rpc_args_=[["
+	for i, i2 := range id {
+		s = s + strconv.FormatInt(i2, 10)
+		if i != len(id)-1 {
+			s = s + ","
+		}
+	}
+	s = s + `],true,""]`
+	res, _ := biliClient.Resty.R().Get(s)
+	var m0 map[string]interface{}
+	json.Unmarshal(res.Body(), &m0)
+
+	if !strings.Contains(res.String()[0:70], "_ts_rpc_return_") || strings.Contains(res.String()[0:70], "服务调用超时") {
+		fmt.Println(res.String())
+		time.Sleep(time.Second * 3)
+		RefreshStatus(id)
+
+	}
+	for s2, _ := range m0["_ts_rpc_return_"].(map[string]interface{})["data"].(map[string]interface{}) {
+		if getString(s2, "liveStatus") == "1" {
+			var room = toInt(getString(s2, "roomId"))
+			mutex.Lock()
+			_, ok := m[room]
+			if !ok {
+				m[room] = &RoomStatus{}
+				TraceStream(biliClient.Resty, room, "", config.GlobalConfig)
+			}
+			mutex.Unlock()
+		}
+	}
+}
+
+var client = resty.New()
+var oneDrive = &OneDriveStorageConfig{}
+var cookie, _ = os.ReadFile("cookie.txt")
+var biliClient = bili.NewClient(string(cookie), bili.ClientOptions{
+	HttpProxy: config.ProxyPass,
+	ProxyUser: config.ProxyUser,
+	ProxyPass: config.ProxyPass,
+})
+
+var biliDirectClient = bili.NewClient(string(cookie), bili.ClientOptions{})
+var config Config
+
+func loadConfig() {
+	bytes, err := os.ReadFile("config.json")
+	if err != nil {
+		log.Println("[Error]", err)
+		debug.PrintStack()
+		os.Exit(1)
+	}
+	err = json.Unmarshal(bytes, &config)
+	if err != nil {
+		log.Println("[Error]", err)
+		debug.PrintStack()
+		os.Exit(1)
+	}
+}
+
 func main() {
-	//ffmpeg is required
+	go InitHTTP()
+	c := cron.New()
+	loadConfig()
+	initResty()
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
-	file, _ := os.ReadFile("cookie.txt")
-	var client = bili.NewClient(string(file), bili.ClientOptions{})
-	TraceStream(client, 23375552, "out.mp4", RoomConfig{
-		KeepTemp:   true,
-		ReEncoding: true,
-		Encoder:    "hevc_qsv",
-		//Encoder: "hevc_amf",
-		//Encoder: "libsvtav1",
-		//Encoder:         "hevc_qsv",
-		//Encoder:         "av1_amf",
-		//Encoder:         "av1_nvenc",
-		EncodeChunkTime: 60,
-		EnableSTT:       false,
-		STTEndpoint:     "https://jeniya.cn/v1/audio/transcriptions",
-		STTAuth:         "sk",
-		ChatEndPoint:    "http://jeniya.cn/v1/chat/completions",
-		Model:           "deepseek-v3-250324",
+	if config.GlobalConfig.Dst.Type() == "onedrive" {
+		var c = config.GlobalConfig.Dst.(OneDriveStorageConfig)
+		oneDrive = &c
+		oneDriveInit(oneDrive)
+	}
+	RefreshStatus(config.Rooms)
+	c.AddFunc("@every 60s", func() {
+		RefreshStatus(config.Rooms)
 	})
+	c.Start()
+	/*
+		page := biliClient.GetAreaLiveByPage(9, 1)
+
+		page = page[:5]
+
+		for i := range page {
+			go func() {
+				TraceStream(client, page[i].Room, "out.mp4", RoomConfig{
+					KeepTemp:   true,
+					ReEncoding: false,
+					//Encoder:    "hevc_qsv",
+					//Encoder: "hevc_amf",
+					//Encoder: "libsvtav1",
+					//Encoder:         "hevc_qsv",
+					//Encoder:         "av1_amf",
+					Encoder:   "av1_nvenc",
+					ChunkTime: 60,
+					Dst:       oneDrive,
+				})
+			}()
+			time.Sleep(5 * time.Second)
+		}
+
+	*/
+
+	select {}
+
 }
