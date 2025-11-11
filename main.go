@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net/url"
 	"os"
@@ -54,6 +53,7 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 	var ext = ".flv"
 
 	resp, err := client.R().
+		SetHeader("Referer", "https://live.bilibili.com").
 		SetDoNotParseResponse(true).
 		Get(stream)
 	if err != nil {
@@ -66,7 +66,7 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 
 	var bytes int64 = 0
 
-	buffer := make([]byte, 1024*1024)
+	buffer := make([]byte, 1024*128)
 
 	oneDriveId := ""
 	oneDriveUrl := ""
@@ -81,8 +81,16 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 
 	}
 	if typo == "local" {
-		var dst, _ = CreateFile(config.Dst.(*LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.String(), ":", "-") + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
+		var dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
 		w = bufio.NewWriter(dst)
+		defer dst.Close()
+		defer func() {
+			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-acodec", "copy", strings.Replace(dst.Name(), ".flv", ".aac", 1))
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Run()
+		}()
+
 	}
 
 	for {
@@ -104,7 +112,7 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 		}
 
 		if typo == "local" {
-			w.Write(buffer[:n])
+			w.Write(buffer)
 			w.Flush()
 		}
 		if typo == "onedrive" {
@@ -180,7 +188,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 
 	var dst, _ = os.Create("")
 	if dstType == "local" {
-		dst, _ = os.Create(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.String(), ":", "-") + "/" + title + "." + ext)
+		dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + title + "." + ext)
 	}
 
 	w := bufio.NewWriter(dst)
@@ -189,6 +197,13 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 		mutex.Lock()
 		delete(m0, uname)
 		mutex.Unlock()
+		if dstType == "local" {
+			dst.Close()
+			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-vcodec", config.Encoder, strings.Replace(dst.Name(), ".mp4", "-code.mp4", 1))
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+			cmd.Run()
+		}
 	}()
 
 	var bytes int64 = 0  //用于标记OneDrive上传的字节数
@@ -210,25 +225,6 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 	}
 	go func() {
 		TraceAudio(client, room, config, live)
-	}()
-	go func() {
-		<-sigs
-		if config.ReEncoding { //按下ctrl-c的时候，如果启用了重新编码，就合并所有分片
-			var content = ""
-			dir, _ := ioutil.ReadDir("temp")
-			for _, info := range dir {
-				var name = "temp/" + info.Name()
-				if strings.Contains(name, "-code.mp4") {
-					content += fmt.Sprintf("file '%s'\n", name)
-				}
-			}
-			os.WriteFile("list.txt", []byte(content), 0644)
-			cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", dst0)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Run()
-		}
-		os.Exit(0)
 	}()
 	go func() {
 		for {
@@ -262,19 +258,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 				if config.ReEncoding {
 					//直播结束，如果启用了重新编码，就合并所有分片
 					fmt.Println(err)
-					dir, _ := ioutil.ReadDir("temp")
-					var content = ""
-					for _, info := range dir {
-						var name = "temp/" + info.Name()
-						if strings.Contains(name, "-code.mp4") {
-							content += fmt.Sprintf("file '%s'\n", name)
-						}
-					}
-					os.WriteFile("list.txt", []byte(content), 0644)
-					cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", dst0)
-					cmd.Stdout = os.Stdout
-					cmd.Stderr = os.Stderr
-					cmd.Run()
+
 				}
 				if config.Dst.(Storage).Type() == "alist" {
 					pw.Close()
@@ -367,14 +351,16 @@ func RefreshStatus(id []int64) {
 		RefreshStatus(id)
 
 	}
-	for s2, _ := range m0["_ts_rpc_return_"].(map[string]interface{})["data"].(map[string]interface{}) {
-		if getString(s2, "liveStatus") == "1" {
-			var room = toInt(getString(s2, "roomId"))
+	for _, i := range m0["_ts_rpc_return_"].(map[string]interface{})["data"].(map[string]interface{}) {
+		if getString(i, "liveStatus") == "1" {
+			var room = toInt(getString(i, "roomId"))
 			mutex.Lock()
 			_, ok := m[room]
 			if !ok {
-				m[room] = &RoomStatus{}
-				TraceStream(biliClient.Resty, room, "", config.GlobalConfig)
+				go func() {
+					m[room] = &RoomStatus{}
+					TraceStream(biliClient.Resty, room, "", config.GlobalConfig)
+				}()
 			}
 			mutex.Unlock()
 		}
@@ -408,6 +394,15 @@ func loadConfig() {
 	}
 }
 
+func saveConfig() {
+	bytes, err := json.Marshal(config)
+	if err != nil {
+		log.Println("[Error]", err)
+		debug.PrintStack()
+	}
+	err = os.WriteFile("config.json", bytes, 0644)
+}
+
 func main() {
 	go InitHTTP()
 	c := cron.New()
@@ -419,9 +414,9 @@ func main() {
 		oneDrive = &c
 		oneDriveInit(oneDrive)
 	}
-	RefreshStatus(config.Rooms)
+	RefreshStatus(config.Livers)
 	c.AddFunc("@every 60s", func() {
-		RefreshStatus(config.Rooms)
+		RefreshStatus(config.Livers)
 	})
 	c.Start()
 	/*

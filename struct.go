@@ -62,7 +62,7 @@ type Config struct {
 	GlobalConfig   RoomConfig
 	OverrideConfig map[int]RoomConfig
 	Port           int //api端口
-	Rooms          []int64
+	Livers         []int64
 }
 
 type Live struct {
