@@ -102,6 +102,7 @@ func (r *RoomConfig) UnmarshalJSON(data []byte) error {
 		switch typeCheck.Type {
 		case "local":
 			var local LocalStorageConfig
+
 			if err := json.Unmarshal(aux.Dst, &local); err != nil {
 				return err
 			}
@@ -119,10 +120,11 @@ func (r *RoomConfig) UnmarshalJSON(data []byte) error {
 			}
 			r.Dst = alist
 		case "onedrive":
-			var onedrive OneDriveStorageConfig
+			var onedrive *OneDriveStorageConfig
 			if err := json.Unmarshal(aux.Dst, &onedrive); err != nil {
 				return err
 			}
+			onedrive.Type()
 			r.Dst = onedrive
 		default:
 			return fmt.Errorf("unknown storage type: %s", typeCheck.Type)
@@ -130,6 +132,36 @@ func (r *RoomConfig) UnmarshalJSON(data []byte) error {
 	}
 
 	return nil
+}
+
+func (r RoomConfig) MarshalJSON() ([]byte, error) {
+	type Alias RoomConfig
+	aux := &struct {
+		Dst any `json:"Dst"`
+		*Alias
+	}{
+		Alias: (*Alias)(&r),
+	}
+
+	// 序列化 Dst，补上 type 字段
+	if r.Dst != nil {
+		// d 是原本的配置结构体
+		d, err := json.Marshal(r.Dst)
+		if err != nil {
+			return nil, err
+		}
+
+		// 转为 map，加上 type 字段
+		var m map[string]any
+		if err := json.Unmarshal(d, &m); err != nil {
+			return nil, err
+		}
+		m["Type"] = r.Dst.Type()
+
+		aux.Dst = m
+	}
+
+	return json.Marshal(aux)
 }
 
 type RoomStatus struct {
@@ -141,4 +173,8 @@ type RoomStatus struct {
 	Room   int
 	Live   time.Time //直播开始时间
 	Record time.Time //录制开始时间
+}
+
+type MetaData struct {
+	RoomConfig
 }

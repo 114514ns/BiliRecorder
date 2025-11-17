@@ -86,8 +86,8 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 		defer dst.Close()
 		defer func() {
 			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-acodec", "copy", strings.Replace(dst.Name(), ".flv", ".aac", 1))
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			//cmd.Stdout = os.Stdout
+			//cmd.Stderr = os.Stderr
 			cmd.Run()
 		}()
 
@@ -131,6 +131,8 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 
 }
 func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig) {
+
+	refreshTicker := time.NewTicker(time.Minute * 40)
 
 	var live Live
 
@@ -195,13 +197,13 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 	defer func() {
 		log.Printf("[%s] Exit\n", uname)
 		mutex.Lock()
-		delete(m0, uname)
+		delete(m, room)
 		mutex.Unlock()
 		if dstType == "local" {
 			dst.Close()
 			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-vcodec", config.Encoder, strings.Replace(dst.Name(), ".mp4", "-code.mp4", 1))
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
+			//cmd.Stdout = os.Stdout
+			//cmd.Stderr = os.Stderr
 			cmd.Run()
 		}
 	}()
@@ -224,12 +226,14 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 	}
 	go func() {
-		TraceAudio(client, room, config, live)
+		//TraceAudio(client, room, config, live)
 	}()
 	go func() {
-		for {
-			time.Sleep(time.Minute * 10)
+
+		for range refreshTicker.C {
+			var t0 = stream
 			stream = biliClient.GetLiveStream(room, false)
+			log.Printf("[%s] Last Stream%s\nRefresh Stream: \n"+stream, uname, t0)
 		}
 	}()
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
@@ -244,7 +248,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 			return
 		case <-ticker.C:
 			str, err := biliClient.Resty.R().Get(stream)
-			var retry = 3
+			var retry = 1
 			for {
 				if str.StatusCode() != 200 && retry > 0 {
 					stream = biliClient.GetLiveStream(room, false)
@@ -255,18 +259,15 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 				}
 			}
 			if err != nil || str.StatusCode() != 200 {
-				if config.ReEncoding {
-					//直播结束，如果启用了重新编码，就合并所有分片
-					fmt.Println(err)
-
-				}
+				refreshTicker.Stop()
+				ticker.Stop()
 				if config.Dst.(Storage).Type() == "alist" {
 					pw.Close()
 				}
 				if config.Dst.(Storage).Type() == "onedrive" {
 					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
 				}
-				return
+				done <- true
 			}
 
 			for _, s := range strings.Split(str.String(), "\n") {
@@ -307,6 +308,11 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 								pw.Write(r.Body())
 							}
 							if dstType == "onedrive" {
+								if len(r.Body()) == 0 {
+									log.Printf("[%s] Length Error\n", uname)
+									log.Printf("[%s] "+r.Request.URL, uname)
+									log.Printf("[%s] %d", uname, r.StatusCode())
+								}
 								if oneDrive.ChunkSize-bytes <= 1024*1024*10 {
 									oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize-1, oneDrive.ChunkSize, oneDriveUrl, r.Body())
 									oneDriveChunk++
@@ -410,8 +416,8 @@ func main() {
 	initResty()
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
 	if config.GlobalConfig.Dst.Type() == "onedrive" {
-		var c = config.GlobalConfig.Dst.(OneDriveStorageConfig)
-		oneDrive = &c
+		var c = config.GlobalConfig.Dst.(*OneDriveStorageConfig)
+		oneDrive = c
 		oneDriveInit(oneDrive)
 	}
 	RefreshStatus(config.Livers)
