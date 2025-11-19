@@ -35,11 +35,14 @@ func initResty() {
 
 	client.OnAfterResponse(func(c *resty.Client, response *resty.Response) error {
 		if response.StatusCode() > 299 && response.StatusCode() != 404 {
-			log.Println(response.StatusCode())
-			log.Println(response.String())
-			log.Println(response.Request.URL)
-			debug.PrintStack()
+
 		}
+		log.Println(response.StatusCode())
+		log.Printf(response.Request.Header.Get("Content-Length"))
+		log.Printf(response.Request.Header.Get("Content-Range"))
+		log.Println(response.String())
+		log.Println(response.Request.URL)
+		debug.PrintStack()
 		return nil
 	})
 }
@@ -259,13 +262,17 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 				}
 			}
 			if err != nil || str.StatusCode() != 200 {
+				log.Println(err)
+				log.Println(str.StatusCode())
 				refreshTicker.Stop()
 				ticker.Stop()
 				if config.Dst.(Storage).Type() == "alist" {
 					pw.Close()
 				}
 				if config.Dst.(Storage).Type() == "onedrive" {
-					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
+					go func() {
+						oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
+					}()
 				}
 				done <- true
 			}
@@ -320,7 +327,9 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 									bytes = 0
 									fmt.Println("end")
 								} else {
-									oneDriveUpload(oneDrive, bytes, bytes+int64(len(r.Body())), oneDrive.ChunkSize, oneDriveUrl, r.Body())
+									go func() {
+										oneDriveUpload(oneDrive, bytes, bytes+int64(len(r.Body())), oneDrive.ChunkSize, oneDriveUrl, r.Body())
+									}()
 									bytes = bytes + int64(len(r.Body()))
 								}
 							}
@@ -401,7 +410,7 @@ func loadConfig() {
 }
 
 func saveConfig() {
-	bytes, err := json.Marshal(config)
+	bytes, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
 		log.Println("[Error]", err)
 		debug.PrintStack()
