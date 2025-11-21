@@ -173,6 +173,7 @@ type RoomStatus struct {
 	Room   int
 	Live   time.Time //直播开始时间
 	Record time.Time //录制开始时间
+	End    bool
 }
 
 type MetaData struct {
