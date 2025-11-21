@@ -7,13 +7,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/go-resty/resty/v2"
 )
 
 func accessToken(config *OneDriveStorageConfig) string {
-	client := resty.New()
-	res, err := client.R().
+	res, err := biliClient.Resty.R().
 		SetHeader("Content-Type", "application/x-www-form-urlencoded").
 		SetFormData(map[string]string{
 			"grant_type":    "refresh_token",
