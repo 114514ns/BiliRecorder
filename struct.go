@@ -30,6 +30,8 @@ type OneDriveStorageConfig struct {
 	RootID         string
 	ChunkSize      int64
 	AudioChunkSize int64
+	BufferChunk    int
+	Retry          int
 }
 type Storage interface {
 	Type() string
@@ -56,6 +58,7 @@ type RoomConfig struct {
 	Dst        Storage
 }
 type Config struct {
+	Cookie         string
 	ProxyServer    string
 	ProxyUser      string
 	ProxyPass      string
@@ -165,14 +168,22 @@ func (r RoomConfig) MarshalJSON() ([]byte, error) {
 }
 
 type RoomStatus struct {
-	Audio  string //音频流
-	Video  string // 视频流
-	Title  string
-	UName  string
-	UID    int64
-	Room   int
-	Live   time.Time //直播开始时间
-	Record time.Time //录制开始时间
+	Stream              string // 视频流
+	Title               string
+	UName               string
+	UID                 int64
+	Room                int
+	Live                time.Time   //直播开始时间
+	Record              time.Time   //录制开始时间
+	ChunkRecord         []time.Time //每个分片的开始时间
+	End                 bool
+	OnedriveOffset      int64
+	OnedriveAudioOffset int64
+	BufferChunk         int
+	BufferBytes         []byte    `json:"-"` //视频流
+	AudioBufferBytes    []byte    `json:"-"`
+	ChunkBegin          time.Time `json:"-"`
+	BitRate             float64
 }
 
 type MetaData struct {

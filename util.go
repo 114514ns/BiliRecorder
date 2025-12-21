@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"math"
 	"os"
@@ -8,6 +10,8 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+
+	"github.com/asticode/go-astits"
 )
 
 type JsonType struct {
@@ -116,4 +120,39 @@ func CreateFile(path string) (*os.File, error) {
 		return nil, fmt.Errorf("无法创建文件 %s: %v", path, err)
 	}
 	return file, nil
+}
+func chunkSlice[T any](slice []T, size int) [][]T {
+	if size <= 0 {
+		return nil
+	}
+	var chunks [][]T
+	for i := 0; i < len(slice); i += size {
+		end := i + size
+		if end > len(slice) {
+			end = len(slice)
+		}
+		chunks = append(chunks, slice[i:end])
+	}
+	return chunks
+}
+
+func Extract(in []byte) []byte {
+	ctx, cancel := context.WithCancel(context.Background())
+	var dst = make([]byte, 0)
+	defer cancel()
+	dmx := astits.NewDemuxer(ctx, bytes.NewReader(in))
+	var audioPID uint16 = 257
+	for {
+		d, err := dmx.NextData()
+		if err != nil {
+			break
+		}
+		if d.PES != nil && d.PID == audioPID {
+			payload := d.PES.Data
+			if len(payload) > 0 {
+				dst = append(dst, payload...)
+			}
+		}
+	}
+	return dst
 }

@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-resty/resty/v2"
 )
 
 func accessToken(config *OneDriveStorageConfig) string {
@@ -21,7 +23,7 @@ func accessToken(config *OneDriveStorageConfig) string {
 		}).
 		Post("https://login.microsoftonline.com/common/oauth2/v2.0/token")
 	if err != nil {
-		panic(err)
+		return config.AccessToken
 	}
 	var obj interface{}
 	json.Unmarshal(res.Body(), &obj)
@@ -90,19 +92,35 @@ func oneDriveMkDir(config *OneDriveStorageConfig, item, name string) string {
 	json.Unmarshal(res.Body(), &obj)
 	return getString(obj, "id")
 }
-func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path string, content []byte) {
+func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path string, content []byte, label ...string) (int, *resty.Response) {
+
 	expectedLen := to - from + 1
 	contentLen := int64(len(content))
+	if len(label) == 0 {
+		label = append(label, "")
+	}
 
-	// 如果内容大小符合预期，直接上传
 	if contentLen == expectedLen {
-		client.R().
+		r, e := client.R().
 			SetHeader("authorization", "Bearer "+config.AccessToken).
 			SetHeader("Content-Length", strconv.Itoa(len(content))).
 			SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, max)).
+			SetHeader("Label", label[0]).
 			SetBody(content).
 			Put(path)
-		return
+
+		if e != nil {
+			log.Println(e)
+			time.Now()
+		}
+		if r == nil {
+			time.Now()
+		} else {
+			//log.Println(r.String())
+		}
+
+		return r.StatusCode(), r
+
 	}
 
 	// 内容小于预期，需要填充
@@ -111,18 +129,29 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 
 		// 如果填充量小于等于32MB，直接创建完整数组一次上传
 		if paddingNeeded <= int64(32*1024*1024) {
+			log.Println("hit")
 			fullContent := make([]byte, expectedLen)
 			copy(fullContent, content)
 
-			client.R().
+			r, e := client.R().
 				SetHeader("authorization", "Bearer "+config.AccessToken).
 				SetHeader("Content-Length", strconv.FormatInt(expectedLen, 10)).
 				SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, max)).
 				SetBody(fullContent).
 				Put(path)
-			return
+			if e != nil {
+				log.Println(e)
+				time.Now()
+			}
+			if r == nil {
+				time.Now()
+			} else {
+				log.Println(r.String())
+			}
+			return r.StatusCode(), r
 		}
 
+		log.Println("hit")
 		// 填充量大于32MB，先上传实际内容
 		actualTo := from + contentLen - 1
 		client.R().
@@ -151,20 +180,30 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 				chunk = chunk[:len(chunk)-1]
 				last = true
 			}
-			client.R().
+			r, err := client.R().
 				SetHeader("authorization", "Bearer "+config.AccessToken).
 				SetHeader("Content-Length", strconv.FormatInt(size, 10)).
 				SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", currentFrom, currentTo, max)).
 				SetBody(chunk).
 				Put(path)
 
+			if err != nil {
+				fmt.Println(err.Error())
+			}
+			if r == nil {
+				time.Now()
+			} else {
+				log.Println(r.String())
+			}
+
 			if last {
-				return
+				return r.StatusCode(), r
 			}
 
 			currentFrom = currentTo + 1
 		}
 	}
+	return 200, nil
 }
 func oneDriveInit(config *OneDriveStorageConfig) {
 	config.AccessToken = accessToken(config)

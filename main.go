@@ -7,15 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
-	"os/signal"
 	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	bili "github.com/114514ns/BiliClient"
@@ -24,36 +23,158 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+var last = make(map[string]string)
+
 func initResty() {
+	httpClient := client.GetClient()
+
+	// 配置 Transport 禁用 HTTP/2
+	httpClient.Transport = &http.Transport{
+		ForceAttemptHTTP2: false, // 禁用 HTTP/2
+	}
+
 	client.OnBeforeRequest(func(c *resty.Client, request *resty.Request) error {
 		request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
 		if strings.Contains(request.URL, "bilibili.com") {
 			request.Header.Set("Cookie", "buvid3="+uuid.New().String()+"infoc")
 		}
+		if request.Header.Get("Content-Range") != "" {
+			log.Println("submit   " + request.Header.Get("Content-Range"))
+		}
+		request.Header.Set("UUID", uuid.NewString())
+
 		return nil
 	})
 
 	client.OnAfterResponse(func(c *resty.Client, response *resty.Response) error {
 		if response.StatusCode() > 299 && response.StatusCode() != 404 {
+			log.Println(response.StatusCode())
+			log.Println(response.Request.Header.Get("Content-Length"))
+			log.Println(response.Request.Header.Get("Content-Range"))
+			log.Println(response.String())
 
+			log.Println(response.Request.URL)
+			log.Println(response.Request.Header.Get("UUID"))
+
+			log.Println(last[response.Request.Header.Get("Label")])
+
+			//debug.PrintStack()
 		}
-		log.Println(response.StatusCode())
-		log.Printf(response.Request.Header.Get("Content-Length"))
-		log.Printf(response.Request.Header.Get("Content-Range"))
-		log.Println(response.String())
-		log.Println(response.Request.URL)
-		debug.PrintStack()
+		if response.Request.Header.Get("Label") != "" {
+			last[response.Request.Header.Get("Label")] = response.Request.Header.Get("Content-Range")
+		}
+
 		return nil
 	})
 }
 
+func GetStreamFlv(room int, client *resty.Client) string {
+	res, _ := client.R().Get(fmt.Sprintf("https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo?codec=0,1,2&format=0,1,2&protocol=0,1,2&qn=10000&room_id=%d", room))
+	var obj interface{}
+	json.Unmarshal(res.Body(), &obj)
+	var o0 = getArray(obj, "data.playurl_info.playurl.stream")
+	var o1 = o0[0 /*len(o0)-1*/]
+	var o2 = getArray(o1, "format")[0]
+	var o3 = getArray(o2, "codec")
+	var o4 = o3[len(o3)-1]
+	var o5 = getArray(o4, "url_info")[0]
+
+	var extra = getString(o5, "extra")
+
+	var path = getString(o4, "base_url")
+
+	var host = getString(o5, "host")
+
+	return host + path + extra
+
+}
+
 func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 	var typo = config.Dst.(Storage).Type()
-	var stream = biliDirectClient.GetLiveStream(room, true)
+
+	var ext = ".aac"
+
+	oneDriveId := ""
+	oneDriveUrl := ""
+	var w *bufio.Writer
+	var bytes int64 = 0
+
+	oneDriveChunk := 1
+
+	if typo == "onedrive" {
+
+		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, live.UName)
+		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-"))
+		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
+
+	}
+	if typo == "local" {
+		var dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
+		w = bufio.NewWriter(dst)
+		defer dst.Close()
+		defer func() {
+			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-acodec", "copy", strings.Replace(dst.Name(), ".flv", ".aac", 1))
+			//cmd.Stdout = os.Stdout
+			//cmd.Stderr = os.Stderr
+			cmd.Run()
+		}()
+
+	}
+	var buffer []byte
+	var n = len(buffer)
+	for {
+		_, ok := m[room]
+		if !ok {
+			break
+		}
+		if m[room].End {
+			buffer = m[room].AudioBufferBytes
+			oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
+			break
+		}
+		if int64(len(m[room].AudioBufferBytes)) > 1024*1024*4 {
+
+			buffer = m[room].AudioBufferBytes
+			n = len(buffer)
+			m[room].AudioBufferBytes = make([]byte, 0)
+
+			if typo == "onedrive" {
+				if oneDrive.AudioChunkSize-bytes <= 1024*1024*10 {
+					log.Println(live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
+					_, res := oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
+					log.Println(res.String())
+					oneDriveChunk++
+					oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
+					bytes = 0
+					m[room].OnedriveAudioOffset = 0
+				} else {
+					if code, _ := oneDriveUpload(oneDrive, bytes, bytes+int64(n-1), oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n]); code != 416 {
+						m[room].OnedriveAudioOffset = bytes
+						bytes = bytes + int64(n)
+					} else {
+						bytes = m[room].OnedriveAudioOffset
+					}
+
+				}
+			}
+			if typo == "local" {
+				w.Write(buffer)
+				w.Flush()
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
+
+	}
+
+}
+func TraceVideoFlv(client *resty.Client, room int, config RoomConfig, live Live) {
+	var typo = config.Dst.(Storage).Type()
+	var stream = GetStreamFlv(room, client)
 
 	log.Printf("[%s ]Audio Stream: %v\n", live.UName, stream)
 
-	var ext = ".flv"
+	var ext = ".video.flv"
 
 	resp, err := client.R().
 		SetHeader("Referer", "https://live.bilibili.com").
@@ -69,7 +190,7 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 
 	var bytes int64 = 0
 
-	buffer := make([]byte, 1024*128)
+	buffer := make([]byte, 1024*1024*8)
 
 	oneDriveId := ""
 	oneDriveUrl := ""
@@ -101,7 +222,9 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
 			if n > 0 {
 				if typo == "onedrive" {
-					oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize, oneDrive.AudioChunkSize, oneDriveUrl, make([]byte, 16))
+					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16), toString(int64(room)))
+
+					log.Println("TraceVideoFlv Exit")
 				}
 				if typo == "local" {
 					w.Write(buffer[:n])
@@ -119,21 +242,26 @@ func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
 			w.Flush()
 		}
 		if typo == "onedrive" {
-			if oneDrive.ChunkSize-bytes <= 1024*1024*5 {
-				oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n])
+			if oneDrive.ChunkSize-bytes <= 1024*1024*24 {
+				oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize-1, oneDrive.ChunkSize, oneDriveUrl, buffer[:n])
 				oneDriveChunk++
 				oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
 				bytes = 0
 			} else {
-				oneDriveUpload(oneDrive, bytes, bytes+int64(n), oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n])
+				oneDriveUpload(oneDrive, bytes, bytes+int64(n), oneDrive.ChunkSize, oneDriveUrl, buffer[:n])
 				bytes = bytes + int64(n)
 			}
 		}
 
 	}
-
 }
 func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig) {
+
+	var offsetMap = make([]string, 0)
+
+	var chunk = 1 //ts分片个数
+
+	//var worker = NewPool(1)
 
 	refreshTicker := time.NewTicker(time.Minute * 40)
 
@@ -158,7 +286,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 	if os.IsNotExist(err) {
 		os.Mkdir("temp", os.ModePerm)
 	}
-	var ticker = time.NewTicker(time.Second * 2)
+	var ticker = time.NewTicker(time.Millisecond * 750)
 
 	var m0 = make(map[string]bool)
 
@@ -167,7 +295,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 
 	defer ticker.Stop()
 	done := make(chan bool, 1)
-	sigs := make(chan os.Signal, 1)
+	//sigs := make(chan os.Signal, 1)
 	var oneDriveId = ""
 	var token = ""
 
@@ -229,28 +357,33 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 	}
 	go func() {
-		//TraceAudio(client, room, config, live)
+		TraceAudio(biliDirectClient.Resty, room, config, live)
 	}()
+	//TraceVideoFlv(biliDirectClient.Resty, room, config, live)
+	//select {}
 	go func() {
 
 		for range refreshTicker.C {
 			var t0 = stream
 			stream = biliClient.GetLiveStream(room, false)
+
 			log.Printf("[%s] Last Stream%s\nRefresh Stream: \n"+stream, uname, t0)
 		}
 	}()
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	//signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		if config.Dst.(Storage).Type() == "alist" {
 			alistUploadFile(pr, "Microsoft365/小雾uya.mp4", token, config.Dst.(AlistStorageConfig).Server)
 		}
 	}()
+
 	for {
 		select {
 		case <-done:
 			return
 		case <-ticker.C:
 			str, err := biliClient.Resty.R().Get(stream)
+
 			var retry = 1
 			for {
 				if str.StatusCode() != 200 && retry > 0 {
@@ -261,7 +394,8 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 					break
 				}
 			}
-			if err != nil || str.StatusCode() != 200 {
+			m[room].Stream = str.Request.URL
+			if err != nil || str.StatusCode() != 200 || stream == "" || m[room].End {
 				log.Println(err)
 				log.Println(str.StatusCode())
 				refreshTicker.Stop()
@@ -270,15 +404,26 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 					pw.Close()
 				}
 				if config.Dst.(Storage).Type() == "onedrive" {
-					go func() {
-						oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
-					}()
+					log.Printf("[%s] End", live.UName)
+					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
+
+					mapUrl := oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
+					b, _ := json.Marshal(offsetMap)
+					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
+					mapUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, "metadata.json")
+					b, _ = json.Marshal(m[room])
+					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
 				}
 				done <- true
 			}
-
 			for _, s := range strings.Split(str.String(), "\n") {
-				if !strings.HasPrefix(s, "#") {
+				if m[room].ChunkBegin.IsZero() {
+					m[room].ChunkBegin = time.Now()
+				}
+				if strings.Contains(s, "#EXTINF") {
+					offsetMap = append(offsetMap, s)
+				}
+				if !strings.HasPrefix(s, "#") && s != "" {
 					_, ok := m0[s]
 					if !ok {
 						path := u.Path
@@ -289,7 +434,10 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 								d += s2 + "/"
 							}
 						}
-						r, err1 := client.R().Get("https://" + u.Host + d + s)
+						r, err1 := biliDirectClient.Resty.R().Get("https://" + u.Host + d + s)
+						if r.StatusCode() != 200 {
+							r, err1 = client.R().Get("https://" + u.Host + d + s)
+						}
 						if err1 != nil {
 							log.Println(err1)
 						}
@@ -315,27 +463,115 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 								pw.Write(r.Body())
 							}
 							if dstType == "onedrive" {
-								if len(r.Body()) == 0 {
+								body := r.Body()
+								curBytes := bytes
+								curUrl := oneDriveUrl
+								chunkSize := oneDrive.ChunkSize
+								curOneDrive := oneDrive
+								m[room].BitRate = (float64(bytes) + float64(len(m[room].BufferBytes))) * 10.0 / time.Now().Sub(m[room].ChunkBegin).Seconds() / 1024.0 / 1024.0
+								if len(body) == 0 {
 									log.Printf("[%s] Length Error\n", uname)
 									log.Printf("[%s] "+r.Request.URL, uname)
 									log.Printf("[%s] %d", uname, r.StatusCode())
-								}
-								if oneDrive.ChunkSize-bytes <= 1024*1024*10 {
-									oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize-1, oneDrive.ChunkSize, oneDriveUrl, r.Body())
-									oneDriveChunk++
-									oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
-									bytes = 0
-									fmt.Println("end")
 								} else {
-									go func() {
-										oneDriveUpload(oneDrive, bytes, bytes+int64(len(r.Body())), oneDrive.ChunkSize, oneDriveUrl, r.Body())
-									}()
-									bytes = bytes + int64(len(r.Body()))
+									m[room].AudioBufferBytes = append(m[room].AudioBufferBytes, Extract(body)...)
+
+									var l0st = 0
+									if len(offsetMap) > 0 {
+										l0st = toInt(strings.Split(offsetMap[len(offsetMap)-1], ",")[1]) + 1
+									}
+									offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", l0st, l0st+len(body)-1))
+									if len(m[room].ChunkRecord)+1 == oneDriveChunk {
+										m[room].ChunkRecord = append(m[room].ChunkRecord, time.Now())
+									}
+									if oneDrive.BufferChunk >= 2 {
+										m[room].BufferBytes = append(m[room].BufferBytes, body...)
+										//log.Println("append,length=" + toString(int64(len(m[room].BufferBytes))))
+										if chunk%oneDrive.BufferChunk == 0 {
+											var to int64 = 0
+											var broder = false
+											if chunkSize-(curBytes+int64(len(m[room].BufferBytes))-1) <= 64*1024*1024 {
+												to = chunkSize - 1
+												broder = true
+											} else {
+												to = curBytes + int64(len(m[room].BufferBytes)) - 1
+											}
+											var t = oneDrive.Retry
+											for {
+												t--
+
+												code, r0 := oneDriveUpload(curOneDrive, curBytes, to, chunkSize, curUrl, m[room].BufferBytes)
+												if code != 416 {
+
+													m[room].OnedriveOffset = bytes
+													bytes = curBytes + int64(len(m[room].BufferBytes))
+													//offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
+
+													if broder {
+														m[room].ChunkBegin = time.Now()
+														oneDriveChunk++
+														oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+														offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
+														bytes = 0
+														m[room].OnedriveOffset = 0
+														mapUrl := oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
+														b, _ := json.Marshal(offsetMap)
+														log.Println(oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b))
+
+														offsetMap = make([]string, 0)
+														if r0 == nil {
+															fmt.Println("r0 = nil")
+														}
+														if r0 != nil && !strings.Contains(r0.String(), "createdBy") {
+															fmt.Println(r0.String())
+														}
+													}
+													break
+												} else {
+													bytes = m[room].OnedriveOffset
+												}
+												if t <= 0 {
+													break
+												}
+											}
+											m[room].BufferBytes = make([]byte, 0)
+										}
+									} else {
+										if chunkSize-curBytes <= 10*1024*1024 {
+											// 最后一块
+											oneDriveUpload(curOneDrive, curBytes, chunkSize-1, chunkSize, curUrl, body)
+											oneDriveChunk++
+											oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+											offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
+											bytes = 0
+											m[room].OnedriveOffset = 0
+											fmt.Println("end")
+
+											mapUrl := oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
+
+											b, _ := json.Marshal(offsetMap)
+											oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
+
+											offsetMap = make([]string, 0)
+
+										} else {
+											end := curBytes + int64(len(body)) - 1
+
+											if code, _ := oneDriveUpload(curOneDrive, curBytes, end, chunkSize, curUrl, body); code != 416 {
+												m[room].OnedriveOffset = bytes
+												bytes = curBytes + int64(len(body))
+												offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, end))
+											} else {
+												bytes = m[room].OnedriveOffset
+											}
+										}
+									}
 								}
 							}
 						}
 
 						m0[s] = true
+						chunk++
 					}
 				}
 			}
@@ -348,6 +584,12 @@ var m = make(map[int]*RoomStatus)
 var mutex sync.Mutex
 
 func RefreshStatus(id []int64) {
+	for _, int64s := range chunkSlice(id, 40) {
+		RefreshStatus0(int64s)
+	}
+}
+
+func RefreshStatus0(id []int64) {
 	var s = "https://api.live.bilibili.com/xlive/fuxi-interface/UserService/getUserInfo?_ts_rpc_args_=[["
 	for i, i2 := range id {
 		s = s + strconv.FormatInt(i2, 10)
@@ -363,21 +605,33 @@ func RefreshStatus(id []int64) {
 	if !strings.Contains(res.String()[0:70], "_ts_rpc_return_") || strings.Contains(res.String()[0:70], "服务调用超时") {
 		fmt.Println(res.String())
 		time.Sleep(time.Second * 3)
-		RefreshStatus(id)
+		return
+		//RefreshStatus(id)
 
 	}
 	for _, i := range m0["_ts_rpc_return_"].(map[string]interface{})["data"].(map[string]interface{}) {
+		var room = toInt(getString(i, "roomId"))
 		if getString(i, "liveStatus") == "1" {
-			var room = toInt(getString(i, "roomId"))
-			mutex.Lock()
+			//mutex.Lock()
 			_, ok := m[room]
 			if !ok {
+				m[room] = &RoomStatus{} // 先在锁内写入占位
+				m[room].AudioBufferBytes = make([]byte, 0)
+				//mutex.Unlock()
 				go func() {
-					m[room] = &RoomStatus{}
 					TraceStream(biliClient.Resty, room, "", config.GlobalConfig)
 				}()
+			} else {
+				//mutex.Unlock()
 			}
-			mutex.Unlock()
+		}
+		if getString(i, "liveStatus") == "0" {
+			//mutex.Lock()
+			v, ok := m[room]
+			if ok {
+				v.End = true
+			}
+			//mutex.Unlock()
 		}
 	}
 }
@@ -386,7 +640,7 @@ var client = resty.New()
 var oneDrive = &OneDriveStorageConfig{}
 var cookie, _ = os.ReadFile("cookie.txt")
 var biliClient = bili.NewClient(string(cookie), bili.ClientOptions{
-	HttpProxy: config.ProxyPass,
+	HttpProxy: config.ProxyServer,
 	ProxyUser: config.ProxyUser,
 	ProxyPass: config.ProxyPass,
 })
@@ -418,11 +672,24 @@ func saveConfig() {
 	err = os.WriteFile("config.json", bytes, 0644)
 }
 
+var file = time.Now().Format("2006-01-02_15-04-05") + ".log"
+var logFile, err = os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
+
 func main() {
+	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	log.SetOutput(multiWriter)
 	go InitHTTP()
 	c := cron.New()
 	loadConfig()
 	initResty()
+	biliClient = bili.NewClient(config.Cookie, bili.ClientOptions{
+		HttpProxy: config.ProxyServer,
+		ProxyUser: config.ProxyUser,
+		ProxyPass: config.ProxyPass,
+	})
+
+	biliDirectClient.Cookie = config.Cookie
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
 	if config.GlobalConfig.Dst.Type() == "onedrive" {
 		var c = config.GlobalConfig.Dst.(*OneDriveStorageConfig)
