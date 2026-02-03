@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +20,7 @@ import (
 	bili "github.com/114514ns/BiliClient"
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
+	"github.com/jinzhu/copier"
 	"github.com/robfig/cron/v3"
 )
 
@@ -89,173 +90,14 @@ func GetStreamFlv(room int, client *resty.Client) string {
 
 }
 
-func TraceAudio(client *resty.Client, room int, config RoomConfig, live Live) {
-	var typo = config.Dst.(Storage).Type()
+func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig) {
 
-	var ext = ".aac"
+	var uniqueDir = uuid.NewString()
 
-	oneDriveId := ""
-	oneDriveUrl := ""
-	var w *bufio.Writer
-	var bytes int64 = 0
-
-	oneDriveChunk := 1
-
-	if typo == "onedrive" {
-
-		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, live.UName)
-		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-"))
-		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
-
-	}
-	if typo == "local" {
-		var dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
-		w = bufio.NewWriter(dst)
-		defer dst.Close()
-		defer func() {
-			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-acodec", "copy", strings.Replace(dst.Name(), ".flv", ".aac", 1))
-			//cmd.Stdout = os.Stdout
-			//cmd.Stderr = os.Stderr
-			cmd.Run()
-		}()
-
-	}
-	var buffer []byte
-	var n = len(buffer)
-	for {
-		_, ok := m[room]
-		if !ok {
-			break
-		}
-		if m[room].End {
-			buffer = m[room].AudioBufferBytes
-			oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
-			break
-		}
-		if int64(len(m[room].AudioBufferBytes)) > 1024*1024*4 {
-
-			buffer = m[room].AudioBufferBytes
-			n = len(buffer)
-			m[room].AudioBufferBytes = make([]byte, 0)
-
-			if typo == "onedrive" {
-				if oneDrive.AudioChunkSize-bytes <= 1024*1024*10 {
-					log.Println(live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
-					_, res := oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
-					log.Println(res.String())
-					oneDriveChunk++
-					oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
-					bytes = 0
-					m[room].OnedriveAudioOffset = 0
-				} else {
-					if code, _ := oneDriveUpload(oneDrive, bytes, bytes+int64(n-1), oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n]); code != 416 {
-						m[room].OnedriveAudioOffset = bytes
-						bytes = bytes + int64(n)
-					} else {
-						bytes = m[room].OnedriveAudioOffset
-					}
-
-				}
-			}
-			if typo == "local" {
-				w.Write(buffer)
-				w.Flush()
-			}
-		}
-
-		time.Sleep(100 * time.Millisecond)
-
-	}
-
-}
-func TraceVideoFlv(client *resty.Client, room int, config RoomConfig, live Live) {
-	var typo = config.Dst.(Storage).Type()
-	var stream = GetStreamFlv(room, client)
-
-	log.Printf("[%s ]Audio Stream: %v\n", live.UName, stream)
-
-	var ext = ".video.flv"
-
-	resp, err := client.R().
-		SetHeader("Referer", "https://live.bilibili.com").
-		SetDoNotParseResponse(true).
-		Get(stream)
-	if err != nil {
-		log.Printf("请求失败: %v\n", err)
-		return
-	}
-	defer resp.RawBody().Close()
-
-	var w *bufio.Writer
-
-	var bytes int64 = 0
-
-	buffer := make([]byte, 1024*1024*8)
-
-	oneDriveId := ""
-	oneDriveUrl := ""
-
-	oneDriveChunk := 1
-
-	if typo == "onedrive" {
-
-		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, live.UName)
-		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-"))
-		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
-
-	}
-	if typo == "local" {
-		var dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
-		w = bufio.NewWriter(dst)
-		defer dst.Close()
-		defer func() {
-			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-acodec", "copy", strings.Replace(dst.Name(), ".flv", ".aac", 1))
-			//cmd.Stdout = os.Stdout
-			//cmd.Stderr = os.Stderr
-			cmd.Run()
-		}()
-
-	}
-
-	for {
-		n, err := io.ReadFull(resp.RawBody(), buffer)
-		if err == io.EOF || errors.Is(err, io.ErrUnexpectedEOF) {
-			if n > 0 {
-				if typo == "onedrive" {
-					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16), toString(int64(room)))
-
-					log.Println("TraceVideoFlv Exit")
-				}
-				if typo == "local" {
-					w.Write(buffer[:n])
-					w.Flush()
-
-				}
-			}
-			break
-		} else if err != nil {
-			log.Printf("读取流失败: %v\n", err)
-		}
-
-		if typo == "local" {
-			w.Write(buffer)
-			w.Flush()
-		}
-		if typo == "onedrive" {
-			if oneDrive.ChunkSize-bytes <= 1024*1024*24 {
-				oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize-1, oneDrive.ChunkSize, oneDriveUrl, buffer[:n])
-				oneDriveChunk++
-				oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
-				bytes = 0
-			} else {
-				oneDriveUpload(oneDrive, bytes, bytes+int64(n), oneDrive.ChunkSize, oneDriveUrl, buffer[:n])
-				bytes = bytes + int64(n)
-			}
-		}
-
-	}
-}
-func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig) {
+	var roomConfig RoomConfig
+	_ = copier.CopyWithOption(&roomConfig, &config0, copier.Option{
+		DeepCopy: true,
+	})
 
 	var offsetMap = make([]string, 0)
 
@@ -280,11 +122,15 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 	var uname = getString(obj, "data.data."+toString(uid)+".uname")
 	var count = 0
 	var stream = biliClient.GetLiveStream(room, false)
-	var dstType = config.Dst.(Storage).Type()
+	var dstType = roomConfig.Dst.(Storage).Type()
 	log.Printf("[%s ]Video Stream: \n"+stream, uname)
 	_, err := os.Stat("temp")
 	if os.IsNotExist(err) {
 		os.Mkdir("temp", os.ModePerm)
+	}
+	_, err = os.Stat("temp/" + uniqueDir)
+	if os.IsNotExist(err) {
+		os.Mkdir("temp/"+uniqueDir, os.ModePerm)
 	}
 	var ticker = time.NewTicker(time.Millisecond * 750)
 
@@ -321,7 +167,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 
 	var dst, _ = os.Create("")
 	if dstType == "local" {
-		dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + title + "." + ext)
+		dst, _ = CreateFile(roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + title + "." + ext)
 	}
 
 	w := bufio.NewWriter(dst)
@@ -331,10 +177,54 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 		delete(m, room)
 		mutex.Unlock()
 		if dstType == "local" {
+			var loop = 0
+			for {
+				dir, _ := os.ReadDir("temp/" + uniqueDir)
+				var ok = true
+				for i := range dir {
+					if strings.HasPrefix(dir[i].Name(), ".lck") {
+						ok = false
+						break
+					}
+				}
+				if ok || loop >= 600 {
+					break
+				}
+				time.Sleep(time.Millisecond * 500 * 2)
+				loop++
+			}
 			dst.Close()
-			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-vcodec", config.Encoder, strings.Replace(dst.Name(), ".mp4", "-code.mp4", 1))
-			//cmd.Stdout = os.Stdout
-			//cmd.Stderr = os.Stderr
+
+			var args []string
+			var listContent = ""
+			dir, _ := os.ReadDir("temp/" + uniqueDir)
+			sort.Slice(dir, func(i, j int) bool {
+				return toInt(strings.Replace(dir[i].Name(), "-code.mp4", "", -1)) < toInt(strings.Replace(dir[j].Name(), "-code.mp4", "", -1))
+			})
+			for i := range dir {
+				var fileName = dir[i].Name()
+				if strings.Contains(fileName, "code") {
+					var s = "file '"
+					s += fileName
+					s += "'\r\n"
+					listContent += s
+				}
+			}
+			os.Create("temp/" + uniqueDir + "/list.txt")
+			os.WriteFile("temp/"+uniqueDir+"/list.txt", []byte(listContent), 0644)
+			args = append(args, "-y")
+			args = append(args, "-f")
+			args = append(args, "concat")
+			args = append(args, "-safe")
+			args = append(args, "0")
+			args = append(args, "-i")
+			args = append(args, "temp/"+uniqueDir+"/list.txt")
+			args = append(args, "-c")
+			args = append(args, "copy")
+			args = append(args, dst.Name())
+			cmd := exec.Command("ffmpeg", args...)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
 			cmd.Run()
 		}
 	}()
@@ -343,7 +233,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 	var oneDriveUrl = "" //OneDrive上传url
 	pr, pw := io.Pipe()  //用于上传到Alist
 	if dstType == "alist" {
-		token = alistGetToken(config.Dst.(AlistStorageConfig))
+		token = alistGetToken(roomConfig.Dst.(AlistStorageConfig))
 	}
 	if !(dstType == "alist") {
 		pw.Close()
@@ -354,13 +244,8 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 
 		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, uname)
 		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(begin, ":", "-"))
-		oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+		oneDriveUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 	}
-	go func() {
-		TraceAudio(biliDirectClient.Resty, room, config, live)
-	}()
-	//TraceVideoFlv(biliDirectClient.Resty, room, config, live)
-	//select {}
 	go func() {
 
 		for range refreshTicker.C {
@@ -372,8 +257,8 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 	}()
 	//signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
-		if config.Dst.(Storage).Type() == "alist" {
-			alistUploadFile(pr, "Microsoft365/小雾uya.mp4", token, config.Dst.(AlistStorageConfig).Server)
+		if roomConfig.Dst.(Storage).Type() == "alist" {
+			alistUploadFile(pr, "Microsoft365/小雾uya.mp4", token, roomConfig.Dst.(AlistStorageConfig).Server)
 		}
 	}()
 
@@ -400,17 +285,17 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 				log.Println(str.StatusCode())
 				refreshTicker.Stop()
 				ticker.Stop()
-				if config.Dst.(Storage).Type() == "alist" {
+				if roomConfig.Dst.(Storage).Type() == "alist" {
 					pw.Close()
 				}
-				if config.Dst.(Storage).Type() == "onedrive" {
+				if roomConfig.Dst.(Storage).Type() == "onedrive" {
 					log.Printf("[%s] End", live.UName)
 					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
 
-					mapUrl := oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
+					mapUrl := oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
 					b, _ := json.Marshal(offsetMap)
 					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
-					mapUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, "metadata.json")
+					mapUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, "metadata.json")
 					b, _ = json.Marshal(m[room])
 					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
 				}
@@ -442,24 +327,55 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 							log.Println(err1)
 						}
 						count++
-						if config.ReEncoding { //如果启用了重新编码
+						if roomConfig.Dst.(Storage).Type() == "local" {
+							var fsChunk = count / roomConfig.ChunkTime
+							name := "temp/" + uniqueDir + "/" + strconv.Itoa(fsChunk) + ".mp4"
+							_, err := os.Stat(name)
+							if err != nil {
+								os.Create(name)
+								var f, _ = os.Create(name)
+								w = bufio.NewWriter(f)
+							}
 							w.Write(r.Body())
 							w.Flush()
+							if fsChunk*roomConfig.ChunkTime == count {
+								if roomConfig.ReEncoding {
+									go func() {
+										var args []string
 
-						} else {
-							if config.Dst.(Storage).Type() == "local" {
-								var chunk = count / config.ChunkTime
-								name := "temp/" + strconv.Itoa(chunk) + ".mp4"
-								_, err := os.Stat(name)
-								if err != nil {
-									os.Create(name)
-									var f, _ = os.Create(name)
-									w = bufio.NewWriter(f)
+										if roomConfig.VADevice != "" {
+											args = append(args, "-vaapi_device")
+											args = append(args, roomConfig.VADevice)
+
+										}
+										args = append(args, "-i")
+										args = append(args, "temp/"+uniqueDir+"/"+strconv.Itoa(fsChunk-1)+".mp4")
+
+										if roomConfig.VADevice != "" {
+											args = append(args, "-vf")
+											args = append(args, "format=nv12,hwupload")
+										}
+										args = append(args, "-c:v")
+										args = append(args, roomConfig.Encoder)
+
+										if roomConfig.Bitrate != 0 {
+											args = append(args, "-b:v")
+											args = append(args, toString(int64(roomConfig.Bitrate))+"k")
+										}
+
+										args = append(args, "temp/"+uniqueDir+"/"+strconv.Itoa(fsChunk-1)+"-code.mp4")
+
+										cmd := exec.Command("ffmpeg", args...)
+										cmd.Stdout = os.Stdout
+										cmd.Stderr = os.Stderr
+										var lckFile = uuid.NewString() + ".lck"
+										os.Create(lckFile)
+										cmd.Run()
+										os.Remove(lckFile)
+									}()
 								}
-								w.Write(r.Body())
-								w.Flush()
 							}
-							if config.Dst.(Storage).Type() == "alist" {
+							if roomConfig.Dst.(Storage).Type() == "alist" {
 								pw.Write(r.Body())
 							}
 							if dstType == "onedrive" {
@@ -510,11 +426,11 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 													if broder {
 														m[room].ChunkBegin = time.Now()
 														oneDriveChunk++
-														oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+														oneDriveUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 														offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
 														bytes = 0
 														m[room].OnedriveOffset = 0
-														mapUrl := oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
+														mapUrl := oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
 														b, _ := json.Marshal(offsetMap)
 														log.Println(oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b))
 
@@ -541,13 +457,13 @@ func TraceStream(client *resty.Client, room int, dst0 string, config RoomConfig)
 											// 最后一块
 											oneDriveUpload(curOneDrive, curBytes, chunkSize-1, chunkSize, curUrl, body)
 											oneDriveChunk++
-											oneDriveUrl = oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+											oneDriveUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 											offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
 											bytes = 0
 											m[room].OnedriveOffset = 0
 											fmt.Println("end")
 
-											mapUrl := oneDriveCreate(config.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
+											mapUrl := oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
 
 											b, _ := json.Marshal(offsetMap)
 											oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
@@ -678,10 +594,10 @@ var logFile, err = os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
 func main() {
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	log.SetOutput(multiWriter)
-	go InitHTTP()
 	c := cron.New()
 	loadConfig()
 	initResty()
+	go InitHTTP()
 	biliClient = bili.NewClient(config.Cookie, bili.ClientOptions{
 		HttpProxy: config.ProxyServer,
 		ProxyUser: config.ProxyUser,

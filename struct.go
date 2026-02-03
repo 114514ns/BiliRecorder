@@ -53,6 +53,8 @@ func (s OneDriveStorageConfig) Type() string {
 type RoomConfig struct {
 	ReEncoding bool   //重新编码
 	Encoder    string //编码器
+	VADevice   string //VA API设备，如没有或不需要，留空即可
+	Bitrate    int    //目标码率，单位KB，如不需要，留空即可
 	ChunkTime  int    //每块到多大的时候开始编码
 	KeepTemp   bool   //保留分片，调试用
 	Dst        Storage
