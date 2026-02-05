@@ -58,6 +58,7 @@ type RoomConfig struct {
 	ChunkTime  int    //每块到多大的时候开始编码
 	KeepTemp   bool   //保留分片，调试用
 	Dst        Storage
+	WithEvents bool //记录直播间事件
 }
 type Config struct {
 	Cookie         string

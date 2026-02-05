@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -223,9 +224,19 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 			args = append(args, "copy")
 			args = append(args, dst.Name())
 			cmd := exec.Command("ffmpeg", args...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Run()
+			bytes, _ := cmd.CombinedOutput()
+
+			stat, e := os.Stat(dst.Name())
+
+			if e != nil || stat.Size() < 1024 {
+				log.Printf("[%s] Merge Error\n", uname)
+				log.Printf("[%s] FFmpeg Output\n", uname)
+				log.Println(string(bytes))
+			} else {
+				if !roomConfig.KeepTemp {
+					os.RemoveAll("temp/" + uniqueDir)
+				}
+			}
 		}
 	}()
 
@@ -255,10 +266,66 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 			log.Printf("[%s] Last Stream%s\nRefresh Stream: \n"+stream, uname, t0)
 		}
 	}()
-	//signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		if roomConfig.Dst.(Storage).Type() == "alist" {
 			alistUploadFile(pr, "Microsoft365/小雾uya.mp4", token, roomConfig.Dst.(AlistStorageConfig).Server)
+		}
+	}()
+
+	go func() {
+		if roomConfig.WithEvents {
+			var actions []bili.FrontLiveAction
+
+			var avatarMap = make(map[string]bili.FrontLiveAction)
+
+			var mu sync.Mutex
+			go func() {
+				for {
+					select {
+					case <-ticker.C:
+						{
+							if rand.Int()%2 == 1 { //750ms*2，1.5秒
+								liveActions := biliClient.GetHistory(room)
+								mu.Lock()
+								for i := range liveActions {
+									avatarMap[liveActions[i].Face] = liveActions[i]
+								}
+
+								for i := range actions {
+									if actions[i].FromId == 0 {
+										v, ok := avatarMap[actions[i].Face]
+										if ok {
+											actions[i].FromId = v.FromId
+											actions[i].FromName = v.FromName
+										}
+									}
+								}
+								mu.Unlock()
+							}
+
+							if rand.Int()%12 == 1 {
+								marshal, _ := json.Marshal(actions)
+								if roomConfig.Dst.(Storage).Type() == "local" {
+									os.WriteFile(roomConfig.Dst.(LocalStorageConfig).Location+"/"+live.UName+"/"+strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-")+"/events.json", marshal, 0644)
+								}
+							}
+						}
+					}
+				}
+			}()
+
+			biliClient.TraceLive(toString(int64(room)), func(action bili.FrontLiveAction) {
+				if action.FromId == 0 {
+					v, ok := avatarMap[action.Face]
+					if ok {
+						mu.Lock()
+						action.FromId = v.FromId
+						action.FromName = v.FromName
+						mu.Unlock()
+					}
+				}
+				actions = append(actions, action)
+			}, nil)
 		}
 	}()
 
@@ -372,6 +439,15 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 										os.Create(lckFile)
 										cmd.Run()
 										os.Remove(lckFile)
+
+										stat, e := os.Stat("temp/" + uniqueDir + "/" + strconv.Itoa(fsChunk-1) + "-code.mp4")
+										if e != nil || stat.Size() < 1024 {
+
+										} else {
+											if !roomConfig.KeepTemp {
+												os.Remove("temp/" + uniqueDir + "/" + strconv.Itoa(fsChunk-1) + ".mp4")
+											}
+										}
 									}()
 								}
 							}
