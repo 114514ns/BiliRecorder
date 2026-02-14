@@ -7,20 +7,26 @@ import (
 )
 
 type LocalStorageConfig struct {
-	Location string //本地存储
+	Location  string //本地存储
+	Label     string
+	ForwardTo string
 }
 type AlistStorageConfig struct {
+	Label   string
 	Server  string
 	User    string //Alist
 	Pass    string
 	RootDir string
 }
+
 type S3StorageConfig struct {
+	Label   string
 	User    string //S3，支持边录边传,不过成本太高，也许不会实现，先占个位
 	Pass    string
 	RootDir string
 }
 type OneDriveStorageConfig struct {
+	Label          string
 	AccessToken    string
 	RefreshToken   string
 	ClientID       string
@@ -51,14 +57,16 @@ func (s OneDriveStorageConfig) Type() string {
 }
 
 type RoomConfig struct {
-	ReEncoding bool   //重新编码
-	Encoder    string //编码器
-	VADevice   string //VA API设备，如没有或不需要，留空即可
-	Bitrate    int    //目标码率，单位KB，如不需要，留空即可
-	ChunkTime  int    //每块到多大的时候开始编码
-	KeepTemp   bool   //保留分片，调试用
-	Dst        Storage
-	WithEvents bool //记录直播间事件
+	ReEncoding       bool   //重新编码
+	Encoder          string //编码器
+	VADevice         string //VA API设备，如没有或不需要，留空即可
+	Bitrate          int    //目标码率，单位KB，如不需要，留空即可
+	ChunkTime        int    //每块到多大的时候开始编码
+	KeepTemp         bool   //保留分片，调试用
+	Dst              Storage
+	WithEvents       bool //记录直播间事件
+	EnableTranscribe bool //转录
+	AudioCodec       string
 }
 type Config struct {
 	Cookie         string
@@ -69,6 +77,7 @@ type Config struct {
 	OverrideConfig map[int]RoomConfig
 	Port           int //api端口
 	Livers         []int64
+	Storages       []interface{}
 }
 
 type Live struct {
@@ -191,4 +200,13 @@ type RoomStatus struct {
 
 type MetaData struct {
 	RoomConfig
+}
+
+func getDstByLabel(s string) Storage {
+	for _, i := range config.Storages {
+		if getString(i, "Label") == s {
+			return i.(Storage)
+		}
+	}
+	return nil
 }

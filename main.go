@@ -237,6 +237,30 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 					os.RemoveAll("temp/" + uniqueDir)
 				}
 			}
+
+			var aCodec = roomConfig.AudioCodec
+
+			if aCodec == "" {
+				aCodec = "mp3"
+			}
+
+			cmd = exec.Command("ffmpeg", "-i",
+				roomConfig.Dst.(LocalStorageConfig).Location+"/"+live.UName+"/"+strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-")+"/audio.aac",
+				roomConfig.Dst.(LocalStorageConfig).Location+"/"+live.UName+"/"+strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-")+"/audio."+aCodec)
+			bytes, _ = cmd.CombinedOutput()
+			stat, e = os.Stat(roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/audio." + aCodec)
+			if e != nil || stat.Size() < 1024 {
+				log.Printf("[%s] Auido Code Error Error\n", uname)
+				log.Printf("[%s] FFmpeg Output\n", uname)
+				log.Println(string(bytes))
+			} else {
+				if !roomConfig.KeepTemp {
+					os.Remove(roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/audio.aac")
+				}
+			}
+			if roomConfig.EnableTranscribe {
+
+			}
 		}
 	}()
 
@@ -286,9 +310,21 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 						{
 							if rand.Int()%2 == 1 { //750ms*2，1.5秒
 								liveActions := biliClient.GetHistory(room)
+
+								var online = biliClient.GetLiveOnlineRank(room, uid)
 								mu.Lock()
 								for i := range liveActions {
 									avatarMap[liveActions[i].Face] = liveActions[i]
+								}
+								for _, i := range online {
+									var inner = bili.LiveAction{
+										FromId:   i.UID,
+										FromName: i.UName,
+									}
+									avatarMap[i.Face] = bili.FrontLiveAction{
+										LiveAction: inner,
+										Face:       i.Face,
+									}
 								}
 
 								for i := range actions {
@@ -405,6 +441,18 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 							}
 							w.Write(r.Body())
 							w.Flush()
+
+							afName := roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/audio.aac"
+							_, e := os.Stat(afName)
+
+							if !(e == nil || !os.IsNotExist(e)) {
+								os.Create(afName)
+							}
+							af, e := os.OpenFile(afName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+							if e == nil {
+								af.Write(Extract(r.Body()))
+								af.Close()
+							}
 							if fsChunk*roomConfig.ChunkTime == count {
 								if roomConfig.ReEncoding {
 									go func() {
@@ -672,6 +720,7 @@ func main() {
 	log.SetOutput(multiWriter)
 	c := cron.New()
 	loadConfig()
+	getDstByLabel("local")
 	initResty()
 	go InitHTTP()
 	biliClient = bili.NewClient(config.Cookie, bili.ClientOptions{

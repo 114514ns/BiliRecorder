@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -27,4 +28,11 @@ func TestHttp(t *testing.T) {
 	config.Port++
 
 	InitHTTP()
+}
+
+func TestTranscribe(t *testing.T) {
+	bytes, _ := os.ReadFile("sample/2.json")
+	var obj map[string]interface{}
+	json.Unmarshal(bytes, &obj)
+	parseTranscribe(obj)
 }
