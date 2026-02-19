@@ -91,8 +91,14 @@ func GetStreamFlv(room int, client *resty.Client) string {
 
 }
 
-func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig) {
+func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
+	label := getDstByLabel(config0.DstLabel)
 
+	if label == nil {
+		log.Printf("label %s not exist", config0.DstLabel)
+		return
+	}
+	config0.Dst = label
 	var uniqueDir = uuid.NewString()
 
 	var roomConfig RoomConfig
@@ -166,9 +172,13 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 
 	mutex.Unlock()
 
+	var oneDrive *OneDriveStorageConfig
 	var dst, _ = os.Create("")
 	if dstType == "local" {
 		dst, _ = CreateFile(roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + title + "." + ext)
+	}
+	if dstType == "onedrive" {
+		oneDriveInit(oneDrive)
 	}
 
 	w := bufio.NewWriter(dst)
@@ -458,7 +468,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 									go func() {
 										var args []string
 
-										if roomConfig.VADevice != "" {
+										if roomConfig.VADevice != "" && strings.Contains(roomConfig.Encoder, "vaapi") {
 											args = append(args, "-vaapi_device")
 											args = append(args, roomConfig.VADevice)
 
@@ -466,7 +476,7 @@ func TraceStream(client *resty.Client, room int, dst0 string, config0 RoomConfig
 										args = append(args, "-i")
 										args = append(args, "temp/"+uniqueDir+"/"+strconv.Itoa(fsChunk-1)+".mp4")
 
-										if roomConfig.VADevice != "" {
+										if roomConfig.VADevice != "" && strings.Contains(roomConfig.Encoder, "vaapi") {
 											args = append(args, "-vf")
 											args = append(args, "format=nv12,hwupload")
 										}
@@ -659,7 +669,7 @@ func RefreshStatus0(id []int64) {
 				m[room].AudioBufferBytes = make([]byte, 0)
 				//mutex.Unlock()
 				go func() {
-					TraceStream(biliClient.Resty, room, "", config.GlobalConfig)
+					TraceStream(biliClient.Resty, room, config.GlobalConfig)
 				}()
 			} else {
 				//mutex.Unlock()
@@ -677,7 +687,7 @@ func RefreshStatus0(id []int64) {
 }
 
 var client = resty.New()
-var oneDrive = &OneDriveStorageConfig{}
+var globalOneDrive = &OneDriveStorageConfig{}
 var cookie, _ = os.ReadFile("cookie.txt")
 var biliClient = bili.NewClient(string(cookie), bili.ClientOptions{
 	HttpProxy: config.ProxyServer,
@@ -720,7 +730,6 @@ func main() {
 	log.SetOutput(multiWriter)
 	c := cron.New()
 	loadConfig()
-	getDstByLabel("local")
 	initResty()
 	go InitHTTP()
 	biliClient = bili.NewClient(config.Cookie, bili.ClientOptions{
@@ -732,41 +741,11 @@ func main() {
 	biliDirectClient.Cookie = config.Cookie
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
-	if config.GlobalConfig.Dst.Type() == "onedrive" {
-		var c = config.GlobalConfig.Dst.(*OneDriveStorageConfig)
-		oneDrive = c
-		oneDriveInit(oneDrive)
-	}
 	RefreshStatus(config.Livers)
 	c.AddFunc("@every 60s", func() {
 		RefreshStatus(config.Livers)
 	})
 	c.Start()
-	/*
-		page := biliClient.GetAreaLiveByPage(9, 1)
-
-		page = page[:5]
-
-		for i := range page {
-			go func() {
-				TraceStream(client, page[i].Room, "out.mp4", RoomConfig{
-					KeepTemp:   true,
-					ReEncoding: false,
-					//Encoder:    "hevc_qsv",
-					//Encoder: "hevc_amf",
-					//Encoder: "libsvtav1",
-					//Encoder:         "hevc_qsv",
-					//Encoder:         "av1_amf",
-					Encoder:   "av1_nvenc",
-					ChunkTime: 60,
-					Dst:       oneDrive,
-				})
-			}()
-			time.Sleep(5 * time.Second)
-		}
-
-	*/
-
 	select {}
 
 }
