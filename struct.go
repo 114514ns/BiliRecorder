@@ -66,6 +66,7 @@ type RoomConfig struct {
 	WithEvents       bool //记录直播间事件
 	EnableTranscribe bool //转录
 	AudioCodec       string
+	Container        string //容器格式，ts/fmp4
 }
 type Config struct {
 	Cookie         string

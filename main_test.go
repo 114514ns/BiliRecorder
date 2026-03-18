@@ -21,9 +21,12 @@ func TestHttp(t *testing.T) {
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
 	loadConfig()
 	if config.GlobalConfig.Dst.Type() == "onedrive" {
-		var c = config.GlobalConfig.Dst.(*OneDriveStorageConfig)
-		oneDrive = c
-		oneDriveInit(oneDrive)
+		/*
+			var c = config.GlobalConfig.Dst.(*OneDriveStorageConfig)
+			oneDrive = c
+			oneDriveInit(oneDrive)
+
+		*/
 	}
 	config.Port++
 

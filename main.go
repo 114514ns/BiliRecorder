@@ -116,6 +116,10 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 
 	var live Live
 
+	var fmp4 = make(map[string][]byte)
+
+	var container = roomConfig.Container
+
 	var ext = ".mp4"
 	var obj interface{}
 	res, _ := client.R().Get("https://api.live.bilibili.com/room/v1/Room/get_info?room_id=" + toString(int64(room)))
@@ -128,7 +132,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 	json.Unmarshal(res.Body(), &obj)
 	var uname = getString(obj, "data.data."+toString(uid)+".uname")
 	var count = 0
-	var stream = biliClient.GetLiveStream(room, false)
+	var stream = biliClient.GetLiveStream(room, container, false)
 	var dstType = roomConfig.Dst.(Storage).Type()
 	log.Printf("[%s ]Video Stream: \n"+stream, uname)
 	_, err := os.Stat("temp")
@@ -295,7 +299,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 
 		for range refreshTicker.C {
 			var t0 = stream
-			stream = biliClient.GetLiveStream(room, false)
+			stream = biliClient.GetLiveStream(room, container, false)
 
 			log.Printf("[%s] Last Stream%s\nRefresh Stream: \n"+stream, uname, t0)
 		}
@@ -374,7 +378,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 			}, nil)
 		}
 	}()
-
+	var extMap = ""
 	for {
 		select {
 		case <-done:
@@ -385,7 +389,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 			var retry = 1
 			for {
 				if str.StatusCode() != 200 && retry > 0 {
-					stream = biliClient.GetLiveStream(room, false)
+					stream = biliClient.GetLiveStream(room, container, false)
 					str, err = client.R().Get(stream)
 					retry--
 				} else {
@@ -414,24 +418,44 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 				}
 				done <- true
 			}
+			if strings.Contains(str.String(), ".ts") {
+				container = "ts"
+			}
+			if strings.Contains(str.String(), ".m4s") {
+				container = "fmp4"
+			}
 			for _, s := range strings.Split(str.String(), "\n") {
+				path := u.Path
+				split := strings.Split(path, "/")
+				var d = ""
+				for i, s2 := range split {
+					if i != len(split)-1 {
+						d += s2 + "/"
+					}
+				}
 				if m[room].ChunkBegin.IsZero() {
 					m[room].ChunkBegin = time.Now()
 				}
 				if strings.Contains(s, "#EXTINF") {
 					offsetMap = append(offsetMap, s)
 				}
+
+				if strings.Contains(s, "#EXT-X-MAP:URI=") {
+					extMap0 := strings.Replace(strings.Replace(s, "#EXT-X-MAP:URI=", "", 1), `"`, "", 2)
+					if extMap0 != "" {
+						extMap = extMap0
+						_, ok := fmp4[extMap]
+						if !ok {
+							v, _ := biliDirectClient.Resty.R().Get("https://" + u.Host + d + extMap)
+							fmp4[extMap] = v.Body()
+							log.Printf("[%s] download map %s \n", live.UName, v.Request.URL)
+						}
+					}
+				}
 				if !strings.HasPrefix(s, "#") && s != "" {
 					_, ok := m0[s]
 					if !ok {
-						path := u.Path
-						split := strings.Split(path, "/")
-						var d = ""
-						for i, s2 := range split {
-							if i != len(split)-1 {
-								d += s2 + "/"
-							}
-						}
+
 						r, err1 := biliDirectClient.Resty.R().Get("https://" + u.Host + d + s)
 						if r.StatusCode() != 200 {
 							r, err1 = client.R().Get("https://" + u.Host + d + s)
@@ -448,6 +472,10 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 								os.Create(name)
 								var f, _ = os.Create(name)
 								w = bufio.NewWriter(f)
+							}
+							if count == 1 {
+								log.Printf("[%s] write MAP \n", live.UName)
+								w.Write(fmp4[extMap])
 							}
 							w.Write(r.Body())
 							w.Flush()
