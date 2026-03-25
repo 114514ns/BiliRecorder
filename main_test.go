@@ -20,17 +20,10 @@ func TestExtract(t *testing.T) {
 func TestHttp(t *testing.T) {
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
 	loadConfig()
-	if config.GlobalConfig.Dst.Type() == "onedrive" {
-		/*
-			var c = config.GlobalConfig.Dst.(*OneDriveStorageConfig)
-			oneDrive = c
-			oneDriveInit(oneDrive)
-
-		*/
-	}
 	config.Port++
 
 	InitHTTP()
+
 }
 
 func TestTranscribe(t *testing.T) {
@@ -38,4 +31,16 @@ func TestTranscribe(t *testing.T) {
 	var obj map[string]interface{}
 	json.Unmarshal(bytes, &obj)
 	parseTranscribe(obj)
+}
+
+func TestOneDrive(t *testing.T) {
+	loadConfig()
+	var oneDrive OneDriveStorageConfig
+	for _, i := range config.Storages {
+		if getString(i, "Type") == "onedrive" {
+			oneDrive = (getDstByLabel(getString(i, "Label")).(OneDriveStorageConfig))
+		}
+	}
+	fmt.Println(oneDriveDownload(&oneDrive, "01TNAFOAYTED2DBQDJC5FIOFCGHVYF6CNT"))
+
 }

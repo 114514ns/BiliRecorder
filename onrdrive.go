@@ -215,6 +215,14 @@ func oneDriveInit(config *OneDriveStorageConfig) {
 		for {
 			config.AccessToken = accessToken(config)
 			time.Sleep(30 * time.Minute)
+
 		}
 	}()
+}
+
+func oneDriveDownload(config *OneDriveStorageConfig, item string) string {
+	var t = resty.New()
+	t.SetRedirectPolicy(resty.NoRedirectPolicy())
+	res, _ := t.R().SetHeader("authorization", "Bearer "+config.AccessToken).Get(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", item))
+	return res.Header().Get("Location")
 }

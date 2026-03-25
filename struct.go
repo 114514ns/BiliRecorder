@@ -67,6 +67,7 @@ type RoomConfig struct {
 	EnableTranscribe bool //转录
 	AudioCodec       string
 	Container        string //容器格式，ts/fmp4
+	AutoConvert      bool   //仅OneDrive dst有效。每个分块上传完成后是否自动开始转换
 }
 type Config struct {
 	Cookie         string
