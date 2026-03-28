@@ -11,6 +11,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jinzhu/copier v0.4.0
 	github.com/robfig/cron/v3 v3.0.1
+	github.com/samber/lo v1.53.0
 )
 
 require (

@@ -69,6 +69,11 @@ type RoomConfig struct {
 	Container        string //容器格式，ts/fmp4
 	AutoConvert      bool   //仅OneDrive dst有效。每个分块上传完成后是否自动开始转换
 }
+
+type Liver struct {
+	UID   int64
+	UName string
+}
 type Config struct {
 	Cookie         string
 	ProxyServer    string
@@ -77,8 +82,11 @@ type Config struct {
 	GlobalConfig   RoomConfig
 	OverrideConfig map[int]RoomConfig
 	Port           int //api端口
-	Livers         []int64
+	Livers         []Liver
 	Storages       []interface{}
+	BiliProxy      string //请求b站api的代理
+	StreamProxy    string
+	OneDriveProxy  string
 }
 
 type Live struct {
@@ -135,6 +143,7 @@ func getDstByLabel(s string) Storage {
 					Retry:          getInt(i, "Retry"),
 					RootDir:        getString(i, "RootDir"),
 					RootID:         getString(i, "RootID"),
+					BufferChunk:    getInt(i, "BufferChunk"),
 				}
 			}
 			return nil

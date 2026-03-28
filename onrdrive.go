@@ -12,7 +12,7 @@ import (
 )
 
 func accessToken(config *OneDriveStorageConfig) string {
-	res, err := biliClient.Resty.R().
+	res, err := oneDriveClient.R().
 		SetHeader("Content-Type", "application/x-www-form-urlencoded").
 		SetFormData(map[string]string{
 			"grant_type":    "refresh_token",
@@ -31,7 +31,7 @@ func accessToken(config *OneDriveStorageConfig) string {
 }
 
 func oneDriveDict(config *OneDriveStorageConfig, name string) string {
-	res, _ := client.R().SetHeader("authorization", "Bearer "+config.AccessToken).
+	res, _ := oneDriveClient.R().SetHeader("authorization", "Bearer "+config.AccessToken).
 		Get(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/root:/%s", name))
 
 	var obj interface{}
@@ -41,7 +41,9 @@ func oneDriveDict(config *OneDriveStorageConfig, name string) string {
 }
 func oneDriveCreate(config *OneDriveStorageConfig, item string, fileName string) string {
 	fileName = strings.Replace(fileName, ":", "-", -1)
-	res, _ := client.R().SetHeader("authorization", "Bearer "+config.AccessToken).SetHeader("Content-Type", "application/json").SetBody("{}").
+	res, _ := oneDriveClient.R().SetHeader("authorization", "Bearer "+config.AccessToken).
+		SetHeader("Content-Type", "application/json").
+		SetBody(`"@microsoft.graph.conflictBehavior":""replace`).
 		Post(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s:/%s:/createUploadSession", item, fileName))
 	var obj interface{}
 	json.Unmarshal(res.Body(), &obj)
@@ -51,7 +53,7 @@ func oneDriveCreate(config *OneDriveStorageConfig, item string, fileName string)
 // 创建文件夹，如果存在直接返回item id，不存在就创建再返回
 func oneDriveMkDir(config *OneDriveStorageConfig, item, name string) string {
 	// 查询当前目录下的所有子项
-	res, err := client.R().
+	res, err := oneDriveClient.R().
 		SetHeader("Authorization", "Bearer "+config.AccessToken).
 		Get(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/children", item))
 	if err != nil {
@@ -79,7 +81,7 @@ func oneDriveMkDir(config *OneDriveStorageConfig, item, name string) string {
 		"@microsoft.graph.conflictBehavior": "fail"
 	}`, name)
 
-	res, err = client.R().
+	res, err = oneDriveClient.R().
 		SetHeader("Authorization", "Bearer "+config.AccessToken).
 		SetHeader("Content-Type", "application/json").
 		SetBody(body).
@@ -94,6 +96,7 @@ func oneDriveMkDir(config *OneDriveStorageConfig, item, name string) string {
 }
 func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path string, content []byte, label ...string) (int, *resty.Response) {
 
+	var resp *resty.Response
 	expectedLen := to - from + 1
 	contentLen := int64(len(content))
 	if len(label) == 0 {
@@ -101,7 +104,7 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 	}
 
 	if contentLen == expectedLen {
-		r, e := client.R().
+		r, e := oneDriveClient.R().
 			SetHeader("authorization", "Bearer "+config.AccessToken).
 			SetHeader("Content-Length", strconv.Itoa(len(content))).
 			SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, max)).
@@ -133,7 +136,7 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 			fullContent := make([]byte, expectedLen)
 			copy(fullContent, content)
 
-			r, e := client.R().
+			r, e := oneDriveClient.R().
 				SetHeader("authorization", "Bearer "+config.AccessToken).
 				SetHeader("Content-Length", strconv.FormatInt(expectedLen, 10)).
 				SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to, max)).
@@ -154,7 +157,7 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 		log.Println("hit")
 		// 填充量大于32MB，先上传实际内容
 		actualTo := from + contentLen - 1
-		client.R().
+		oneDriveClient.R().
 			SetHeader("authorization", "Bearer "+config.AccessToken).
 			SetHeader("Content-Length", strconv.FormatInt(contentLen, 10)).
 			SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, actualTo, max)).
@@ -180,7 +183,7 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 				chunk = chunk[:len(chunk)-1]
 				last = true
 			}
-			r, err := client.R().
+			r, err := oneDriveClient.R().
 				SetHeader("authorization", "Bearer "+config.AccessToken).
 				SetHeader("Content-Length", strconv.FormatInt(size, 10)).
 				SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", currentFrom, currentTo, max)).
@@ -193,17 +196,19 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 			if r == nil {
 				time.Now()
 			} else {
+				resp = r
 				log.Println(r.String())
 			}
 
 			if last {
+
 				return r.StatusCode(), r
 			}
 
 			currentFrom = currentTo + 1
 		}
 	}
-	return 200, nil
+	return 200, resp
 }
 func oneDriveInit(config *OneDriveStorageConfig) {
 	config.AccessToken = accessToken(config)

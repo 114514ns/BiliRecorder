@@ -31,12 +31,14 @@ func InitHTTP() {
 		}
 		var has = false
 		for i := range config.Livers {
-			if uid == config.Livers[i] {
+			if uid == config.Livers[i].UID {
 				has = true
 			}
 		}
 		if !has {
-			config.Livers = append(config.Livers, uid)
+			config.Livers = append(config.Livers, Liver{
+				UID: uid,
+			})
 			c.JSON(200, gin.H{
 				"msg": "ok",
 			})
@@ -63,6 +65,8 @@ func InitHTTP() {
 		}
 
 		var link = c.Query("link")
+
+		var fn = c.Query("fName")
 		_, e := url.Parse(link)
 
 		if e != nil {
@@ -116,6 +120,10 @@ func InitHTTP() {
 
 			var fName = split[len(split)-1]
 
+			if fn != "" {
+				fName = fn
+			}
+
 			cmd := exec.Command("ffmpeg", "-i", fName, "-vcodec", "copy", "-acodec", "copy", strings.Replace(fName, ".mp4", "-COVERT.mp4", 1))
 			//out, _ := cmd.CombinedOutput()
 			//log.Println(string(out))
@@ -157,7 +165,7 @@ func InitHTTP() {
 
 			var CHUNK int64 = 1024 * 1024 * 100
 
-			u := oneDriveCreate(&oneDrive, oneDriveMkDir(&oneDrive, oneDriveMkDir(&oneDrive, oneDrive.RootID, split[5]), split[6]), strings.Replace(fName, ".mp4", "-COVERT.mp4", 1))
+			u := oneDriveCreate(&oneDrive, oneDriveMkDir(&oneDrive, oneDriveMkDir(&oneDrive, oneDrive.RootID, split[5]), split[6]), strings.Replace(fName, ".mp4", "-CONVERT.mp4", 1))
 
 			for {
 				var dst = make([]byte, CHUNK)

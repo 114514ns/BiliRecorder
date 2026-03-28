@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jinzhu/copier"
 	"github.com/robfig/cron/v3"
+	"github.com/samber/lo"
 )
 
 var last = make(map[string]string)
@@ -68,6 +69,15 @@ func initResty() {
 
 		return nil
 	})
+
+	res, _ := client.R().Get("https://my.ippure.com/v1/info")
+	var obj map[string]interface{}
+	json.Unmarshal(res.Body(), &obj)
+	log.Printf("Address : %s\n", getString(obj, "ip"))
+
+	if config.OneDriveProxy != "" {
+		oneDriveClient.SetProxy(config.OneDriveProxy)
+	}
 }
 
 func GetStreamFlv(room int, client *resty.Client) string {
@@ -182,6 +192,8 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 		dst, _ = CreateFile(roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + title + "." + ext)
 	}
 	if dstType == "onedrive" {
+		var t = label.(OneDriveStorageConfig)
+		oneDrive = &t
 		oneDriveInit(oneDrive)
 	}
 
@@ -293,7 +305,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 
 		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, uname)
 		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(begin, ":", "-"))
-		oneDriveUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+		oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 	}
 	go func() {
 
@@ -353,11 +365,21 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 								mu.Unlock()
 							}
 
+							//9秒
 							if rand.Int()%12 == 1 {
 								marshal, _ := json.Marshal(actions)
 								if roomConfig.Dst.(Storage).Type() == "local" {
 									os.WriteFile(roomConfig.Dst.(LocalStorageConfig).Location+"/"+live.UName+"/"+strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-")+"/events.json", marshal, 0644)
 								}
+								if oneDrive != nil {
+									//270秒
+									if rand.Int()%30 == 1 {
+										session := oneDriveCreate(oneDrive, oneDriveId, "events.json")
+										oneDriveUpload(oneDrive, 0, int64(len(marshal)-1), int64(len(marshal)), session, marshal)
+									}
+
+								}
+
 							}
 						}
 					}
@@ -384,7 +406,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 		case <-done:
 			return
 		case <-ticker.C:
-			str, err := biliClient.Resty.R().Get(stream)
+			str, err := biliDirectClient.Resty.R().Get(stream)
 
 			var retry = 1
 			for {
@@ -409,10 +431,10 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 					log.Printf("[%s] End", live.UName)
 					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
 
-					mapUrl := oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
+					mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
 					b, _ := json.Marshal(offsetMap)
 					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
-					mapUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, "metadata.json")
+					mapUrl = oneDriveCreate(oneDrive, oneDriveId, "metadata.json")
 					b, _ = json.Marshal(m[room])
 					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
 				}
@@ -437,7 +459,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 					m[room].ChunkBegin = time.Now()
 				}
 				if strings.Contains(s, "#EXTINF") {
-					offsetMap = append(offsetMap, s)
+					//offsetMap = append(offsetMap, s)
 				}
 
 				if strings.Contains(s, "#EXT-X-MAP:URI=") {
@@ -563,7 +585,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 								if len(m[room].ChunkRecord)+1 == oneDriveChunk {
 									m[room].ChunkRecord = append(m[room].ChunkRecord, time.Now())
 								}
-								if oneDrive.BufferChunk >= 2 {
+								if oneDrive.BufferChunk >= 1 {
 									m[room].BufferBytes = append(m[room].BufferBytes, body...)
 									//log.Println("append,length=" + toString(int64(len(m[room].BufferBytes))))
 									if chunk%oneDrive.BufferChunk == 0 {
@@ -579,7 +601,9 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 										for {
 											t--
 
+											var start = time.Now()
 											code, r0 := oneDriveUpload(curOneDrive, curBytes, to, chunkSize, curUrl, m[room].BufferBytes)
+											fmt.Println(time.Now().Sub(start))
 											if code != 416 {
 
 												m[room].OnedriveOffset = bytes
@@ -589,11 +613,11 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 												if broder {
 													m[room].ChunkBegin = time.Now()
 													oneDriveChunk++
-													oneDriveUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+													oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 													offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
 													bytes = 0
 													m[room].OnedriveOffset = 0
-													mapUrl := oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
+													mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
 													b, _ := json.Marshal(offsetMap)
 													log.Println(oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b))
 
@@ -612,7 +636,8 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 															var link = oneDriveDownload(oneDrive, getString(obj0, "id"))
 															resty.New().R().
 																SetQueryParam("link", link).
-																Get("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
+																SetQueryParam("fName", title+"-"+toString(int64(oneDriveChunk-1))+ext).
+																Post("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
 														}
 													}()
 
@@ -632,13 +657,13 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 										// 最后一块
 										oneDriveUpload(curOneDrive, curBytes, chunkSize-1, chunkSize, curUrl, body)
 										oneDriveChunk++
-										oneDriveUrl = oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+										oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
 										offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
 										bytes = 0
 										m[room].OnedriveOffset = 0
 										fmt.Println("end")
 
-										mapUrl := oneDriveCreate(roomConfig.Dst.(*OneDriveStorageConfig), oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
+										mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
 
 										b, _ := json.Marshal(offsetMap)
 										oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
@@ -679,6 +704,8 @@ func RefreshStatus(id []int64) {
 	}
 }
 
+var INIT = false
+
 func RefreshStatus0(id []int64) {
 	var s = "https://api.live.bilibili.com/xlive/fuxi-interface/UserService/getUserInfo?_ts_rpc_args_=[["
 	for i, i2 := range id {
@@ -691,6 +718,10 @@ func RefreshStatus0(id []int64) {
 	res, _ := biliClient.Resty.R().Get(s)
 	var m0 map[string]interface{}
 	json.Unmarshal(res.Body(), &m0)
+
+	if res.Size() == 0 {
+		return
+	}
 
 	if !strings.Contains(res.String()[0:70], "_ts_rpc_return_") || strings.Contains(res.String()[0:70], "服务调用超时") {
 		fmt.Println(res.String())
@@ -723,10 +754,20 @@ func RefreshStatus0(id []int64) {
 			}
 			//mutex.Unlock()
 		}
+		for i2 := range config.Livers {
+			if config.Livers[i2].UID == toInt64(getString(i, "uid")) {
+				config.Livers[i2].UName = getString(i, "uname")
+			}
+		}
+	}
+	if !INIT {
+		saveConfig()
+		INIT = true
 	}
 }
 
 var client = resty.New()
+var oneDriveClient = resty.New()
 var cookie, _ = os.ReadFile("cookie.txt")
 var biliClient = bili.NewClient(string(cookie), bili.ClientOptions{
 	HttpProxy: config.ProxyServer,
@@ -765,12 +806,14 @@ var file = time.Now().Format("2006-01-02_15-04-05") + ".log"
 var logFile, err = os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
 
 func main() {
+
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	log.SetOutput(multiWriter)
 	c := cron.New()
 	loadConfig()
 	initResty()
 	go InitHTTP()
+
 	biliClient = bili.NewClient(config.Cookie, bili.ClientOptions{
 		HttpProxy: config.ProxyServer,
 		ProxyUser: config.ProxyUser,
@@ -780,9 +823,13 @@ func main() {
 	biliDirectClient.Cookie = config.Cookie
 
 	log.SetFlags(log.Ldate | log.Ltime | log.Llongfile)
-	RefreshStatus(config.Livers)
+	RefreshStatus(lo.Map(config.Livers, func(item Liver, index int) int64 {
+		return item.UID
+	}))
 	c.AddFunc("@every 60s", func() {
-		RefreshStatus(config.Livers)
+		RefreshStatus(lo.Map(config.Livers, func(item Liver, index int) int64 {
+			return item.UID
+		}))
 	})
 	c.Start()
 	select {}
