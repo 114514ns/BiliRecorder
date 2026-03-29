@@ -601,9 +601,8 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 										for {
 											t--
 
-											var start = time.Now()
 											code, r0 := oneDriveUpload(curOneDrive, curBytes, to, chunkSize, curUrl, m[room].BufferBytes)
-											fmt.Println(time.Now().Sub(start))
+											fmt.Println(fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
 											if code != 416 {
 
 												m[room].OnedriveOffset = bytes
@@ -629,13 +628,16 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 														fmt.Println(r0.String())
 													}
 													go func() {
-														time.Sleep(time.Second * 300)
+														time.Sleep(time.Second * 60)
 														if roomConfig.AutoConvert {
 															var obj0 map[string]interface{}
 															json.Unmarshal(r0.Body(), &obj0)
 															var link = oneDriveDownload(oneDrive, getString(obj0, "id"))
 															resty.New().R().
 																SetQueryParam("link", link).
+																SetFormData(map[string]string{
+																	"mapping": string(b),
+																}).
 																SetQueryParam("fName", title+"-"+toString(int64(oneDriveChunk-1))+ext).
 																Post("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
 														}
