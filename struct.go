@@ -122,17 +122,24 @@ type MetaData struct {
 	RoomConfig
 }
 
+var cacheDst = make(map[string]Storage)
+
 func getDstByLabel(s string) Storage {
+	v, ok := cacheDst[s]
+	if ok {
+		return v
+	}
 	for _, i := range config.Storages {
 		if getString(i, "Label") == s {
 			if getString(i, "Type") == "local" {
-				var storage = LocalStorageConfig{
+				var storage = &LocalStorageConfig{
 					Location: getString(i, "Location"),
 				}
+				cacheDst[s] = storage
 				return storage
 			}
 			if getString(i, "Type") == "onedrive" {
-				return OneDriveStorageConfig{
+				var storage = &OneDriveStorageConfig{
 					AccessToken:    getString(i, "AccessToken"),
 					AudioChunkSize: getInt64(i, "AudioChunkSize"),
 					ChunkSize:      getInt64(i, "ChunkSize"),
@@ -145,6 +152,9 @@ func getDstByLabel(s string) Storage {
 					RootID:         getString(i, "RootID"),
 					BufferChunk:    getInt(i, "BufferChunk"),
 				}
+				cacheDst[s] = storage
+				oneDriveInit(storage)
+				return storage
 			}
 			return nil
 		}

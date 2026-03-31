@@ -13,3 +13,73 @@
 - 弹幕
 - webui
 - DOC
+
+# 配置示例
+```json
+{
+  "Cookie": "", //Cookie
+  "ProxyServer": "****", // 代理配置，即将废弃
+  "ProxyUser": "****",
+  "ProxyPass": "****",
+  "GlobalConfig": {
+    "ReEncoding": false, //是否重新编码，仅本地dst生效
+    "Encoder": "libsvtav1", //编码器
+    "VADevice": "/dev/dri/renderD128", //是否使用vaapi，如不需要留空即可
+    "Bitrate": 4500, //目标码率
+    "ChunkTime": 3600, //每隔多久开始编码
+    "KeepTemp": true, //保留编码前的文件
+    "Dst": null,
+    "DstLabel": "onedrive", //要保存到的位置
+    "WithEvents": false, //记录直播间弹幕礼物SC上舰信息
+    "EnableTranscribe": false, //启用语音转录
+    "AudioCodec": "", //音频编码器，如不需要重新编码，留空即可
+    "Container": "ts", //使用的容器格式。
+    "AutoConvert": true //对于保存到OneDrive的情况，是否在每一块上传完成后自动转封装为mp4
+  },
+  "OverrideConfig": {},
+  "Port": 8099, //端口
+  "Livers": [
+    {
+      "UID": 1298779265,
+      "UName": "灰泽满Hazel"
+    },
+    {
+      "UID": 3546757543758795,
+      "UName": "铃见Suzumi"
+    },
+    {
+      "UID": 3493260125276695,
+      "UName": "ハイルラプラス"
+    },
+    {
+      "UID": 1789460279,
+      "UName": "弥月Mizuki"
+    }
+  ],
+  "Storages": [
+    {
+      "Label": "local",
+      "Location": "/root/dst",
+      "Type": "local"
+    },
+    {
+      "AccessToken": "*********",
+      "AudioChunkSize": 268435456,
+      "BufferChunk": 2,
+      "ChunkSize": 1073741884,
+      "ClientID": "***********",
+      "ClientSecret": "*************",
+      "Label": "onedrive",
+      "RedirectURL": "https://api.oplist.org/onedrive/callback",
+      "RefreshToken": "**************",
+      "Retry": 3,
+      "RootDir": "Live",
+      "RootID": "***************",
+      "Type": "onedrive"
+    }
+  ],
+  "BiliProxy": "",
+  "StreamProxy": "",
+  "OneDriveProxy": ""
+}
+```

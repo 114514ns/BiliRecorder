@@ -100,7 +100,89 @@ func GetStreamFlv(room int, client *resty.Client) string {
 	return host + path + extra
 
 }
+func TraceAudio(config RoomConfig, live Live, room int) {
+	var typo = config.Dst.(Storage).Type()
 
+	var ext = ".aac"
+
+	oneDriveId := ""
+	oneDriveUrl := ""
+	var w *bufio.Writer
+	var bytes int64 = 0
+
+	oneDriveChunk := 1
+
+	var oneDrive *OneDriveStorageConfig = nil
+
+	if typo == "onedrive" {
+		oneDrive = getDstByLabel(config.DstLabel).(*OneDriveStorageConfig)
+		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, live.UName)
+		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-"))
+		oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
+
+	}
+	if typo == "local" {
+		var dst, _ = CreateFile(config.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
+		w = bufio.NewWriter(dst)
+		defer dst.Close()
+		defer func() {
+			cmd := exec.Command("ffmpeg", "-i", dst.Name(), "-acodec", "copy", strings.Replace(dst.Name(), ".flv", ".aac", 1))
+			//cmd.Stdout = os.Stdout
+			//cmd.Stderr = os.Stderr
+			cmd.Run()
+		}()
+
+	}
+	var buffer []byte
+	var n = len(buffer)
+	for {
+		_, ok := m[room]
+		if !ok {
+			break
+		}
+		if typo == "onedrive" {
+			if m[room].End {
+				buffer = m[room].AudioBufferBytes
+				oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
+				break
+			}
+		}
+		if int64(len(m[room].AudioBufferBytes)) > 1024*1024*4 {
+
+			buffer = m[room].AudioBufferBytes
+			n = len(buffer)
+			m[room].AudioBufferBytes = make([]byte, 0)
+
+			if typo == "onedrive" {
+				if oneDrive.AudioChunkSize-bytes <= 1024*1024*10 {
+					log.Println(live.Title + "-" + toString(int64(oneDriveChunk)) + ext)
+					_, res := oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
+					log.Println(res.String())
+					oneDriveChunk++
+					oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, live.Title+"-"+toString(int64(oneDriveChunk))+ext)
+					bytes = 0
+					m[room].OnedriveAudioOffset = 0
+				} else {
+					if code, _ := oneDriveUpload(oneDrive, bytes, bytes+int64(n-1), oneDrive.AudioChunkSize, oneDriveUrl, buffer[:n]); code != 416 {
+						m[room].OnedriveAudioOffset = bytes
+						bytes = bytes + int64(n)
+					} else {
+						bytes = m[room].OnedriveAudioOffset
+					}
+
+				}
+			}
+			if typo == "local" {
+				w.Write(buffer)
+				w.Flush()
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
+
+	}
+
+}
 func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 	label := getDstByLabel(config0.DstLabel)
 
@@ -192,11 +274,10 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 		dst, _ = CreateFile(roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/" + title + "." + ext)
 	}
 	if dstType == "onedrive" {
-		var t = label.(OneDriveStorageConfig)
-		oneDrive = &t
-		oneDriveInit(oneDrive)
+		oneDrive = label.(*OneDriveStorageConfig)
 	}
 
+	go TraceAudio(roomConfig, live, room)
 	w := bufio.NewWriter(dst)
 	defer func() {
 		log.Printf("[%s] Exit\n", uname)
@@ -501,18 +582,6 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 							}
 							w.Write(r.Body())
 							w.Flush()
-
-							afName := roomConfig.Dst.(LocalStorageConfig).Location + "/" + live.UName + "/" + strings.ReplaceAll(live.Time.Format(time.DateTime), ":", "-") + "/audio.aac"
-							_, e := os.Stat(afName)
-
-							if !(e == nil || !os.IsNotExist(e)) {
-								os.Create(afName)
-							}
-							af, e := os.OpenFile(afName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-							if e == nil {
-								af.Write(Extract(r.Body()))
-								af.Close()
-							}
 							if fsChunk*roomConfig.ChunkTime == count {
 								if roomConfig.ReEncoding {
 									go func() {
@@ -602,7 +671,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 											t--
 
 											code, r0 := oneDriveUpload(curOneDrive, curBytes, to, chunkSize, curUrl, m[room].BufferBytes)
-											fmt.Println(fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
+											log.Println(fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
 											if code != 416 {
 
 												m[room].OnedriveOffset = bytes
@@ -637,6 +706,8 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 																SetQueryParam("link", link).
 																SetFormData(map[string]string{
 																	"mapping": string(b),
+																	"dir":     oneDriveId,
+																	"id":      getString(obj0, "id"),
 																}).
 																SetQueryParam("fName", title+"-"+toString(int64(oneDriveChunk-1))+ext).
 																Post("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
@@ -828,7 +899,7 @@ func main() {
 	RefreshStatus(lo.Map(config.Livers, func(item Liver, index int) int64 {
 		return item.UID
 	}))
-	c.AddFunc("@every 60s", func() {
+	c.AddFunc("@every 10s", func() {
 		RefreshStatus(lo.Map(config.Livers, func(item Liver, index int) int64 {
 			return item.UID
 		}))

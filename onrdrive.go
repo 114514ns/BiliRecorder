@@ -154,7 +154,6 @@ func oneDriveUpload(config *OneDriveStorageConfig, from, to, max int64, path str
 			return r.StatusCode(), r
 		}
 
-		log.Println("hit")
 		// 填充量大于32MB，先上传实际内容
 		actualTo := from + contentLen - 1
 		oneDriveClient.R().
@@ -218,8 +217,8 @@ func oneDriveInit(config *OneDriveStorageConfig) {
 
 	go func() {
 		for {
-			config.AccessToken = accessToken(config)
 			time.Sleep(30 * time.Minute)
+			config.AccessToken = accessToken(config)
 
 		}
 	}()
@@ -230,4 +229,8 @@ func oneDriveDownload(config *OneDriveStorageConfig, item string) string {
 	t.SetRedirectPolicy(resty.NoRedirectPolicy())
 	res, _ := t.R().SetHeader("authorization", "Bearer "+config.AccessToken).Get(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s/content", item))
 	return res.Header().Get("Location")
+}
+
+func oneDriveDelete(config *OneDriveStorageConfig, item string) {
+	oneDriveClient.SetHeader("authorization", "Bearer "+config.AccessToken).R().Delete(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", item))
 }

@@ -62,7 +62,6 @@ func InitHTTP() {
 		for _, i := range config.Storages {
 			if getString(i, "Type") == "onedrive" {
 				oneDrive = (getDstByLabel(getString(i, "Label")).(OneDriveStorageConfig))
-				oneDriveInit(&oneDrive)
 			}
 		}
 
@@ -97,7 +96,11 @@ func InitHTTP() {
 
 		taskMutex.Unlock()
 
-		var b = []byte(c.PostForm("mapping"))
+		var b = []byte(c.PostForm("mapping")) //分块索引
+
+		var dirId = c.PostForm("dir") //要保存到的目录id
+
+		var itemId = c.PostForm("id") //原始的文件id，成功转封装后自动删除
 
 		c.JSON(http.StatusOK, gin.H{
 			"msg": "submit",
@@ -152,7 +155,7 @@ func InitHTTP() {
 			} else {
 				defer func() {
 					os.Remove(strings.Replace(fName, ".mp4", "-COVERT.mp4", 1))
-					os.Remove(split[len(split)-1])
+					os.Remove(fName)
 				}()
 			}
 
@@ -182,7 +185,11 @@ func InitHTTP() {
 
 			var CHUNK int64 = 1024 * 1024 * 100
 
-			u := oneDriveCreate(&oneDrive, oneDriveMkDir(&oneDrive, oneDriveMkDir(&oneDrive, oneDrive.RootID, split[5]), split[6]), strings.Replace(fName, ".mp4", "-CONVERT.mp4", 1))
+			if dirId == "" {
+				dirId = oneDriveMkDir(&oneDrive, oneDriveMkDir(&oneDrive, oneDrive.RootID, split[5]), split[6])
+			}
+
+			u := oneDriveCreate(&oneDrive, dirId, strings.Replace(fName, ".mp4", "-CONVERT.mp4", 1))
 			var dst = make([]byte, CHUNK)
 			for {
 
@@ -202,7 +209,12 @@ func InitHTTP() {
 				}
 				log.Printf("%d-%d", off, to)
 
-				oneDriveUpload(&oneDrive, off, to, stat.Size(), u, dst[0:n])
+				_, res0 := oneDriveUpload(&oneDrive, off, to, stat.Size(), u, dst[0:n])
+				if res0 != nil {
+					if res0.StatusCode() == 200 || res.StatusCode() == 201 {
+						oneDriveDelete(&oneDrive, itemId)
+					}
+				}
 				off = off + CHUNK
 			}
 		})
