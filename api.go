@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -58,10 +59,10 @@ func InitHTTP() {
 	})
 
 	r.POST("/convert", func(c *gin.Context) {
-		var oneDrive OneDriveStorageConfig
+		var oneDrive *OneDriveStorageConfig
 		for _, i := range config.Storages {
 			if getString(i, "Type") == "onedrive" {
-				oneDrive = (getDstByLabel(getString(i, "Label")).(OneDriveStorageConfig))
+				oneDrive = (getDstByLabel(getString(i, "Label")).(*OneDriveStorageConfig))
 			}
 		}
 
@@ -170,53 +171,60 @@ func InitHTTP() {
 			if e != nil {
 				log.Println(e)
 				return
-			} else {
-
 			}
-
-			var off int64 = 0
-
-			stat, e := open.Stat()
-
-			if e != nil {
-				log.Println(e)
-				return
-			}
-
-			var CHUNK int64 = 1024 * 1024 * 100
 
 			if dirId == "" {
-				dirId = oneDriveMkDir(&oneDrive, oneDriveMkDir(&oneDrive, oneDrive.RootID, split[5]), split[6])
+				dirId = oneDriveMkDir(oneDrive, oneDriveMkDir(oneDrive, oneDrive.RootID, split[5]), split[6])
 			}
 
-			u := oneDriveCreate(&oneDrive, dirId, strings.Replace(fName, ".mp4", "-CONVERT.mp4", 1))
-			var dst = make([]byte, CHUNK)
+			stat, e := os.Stat(open.Name())
+
+			var u = oneDriveCreate(oneDrive, dirId, strings.Replace(fName, ".mp4", "-CONVERT.mp4", 1))
+
+			var from int64 = 0
+			var CHUNK_SIZE int64 = 1024 * 1024 * 100 // 建议先用较小值测试，比如 10MB
+
 			for {
+				to := from + CHUNK_SIZE
+				if to > stat.Size() {
+					to = stat.Size()
+				}
+				chunkLen := to - from
+				section := io.NewSectionReader(open, from, chunkLen)
 
-				n, _ := open.ReadAt(dst, off)
+				req, _ := http.NewRequest("PUT", u, section)
+				//req.Header.Set("Authorization", oneDrive.AccessToken)
 
-				if len(dst[0:n]) == 0 {
+				req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", from, to-1, stat.Size()))
+
+				req.ContentLength = to - from
+
+				h := http.Client{}
+				res0, e0 := h.Do(req)
+				if e0 != nil {
+					log.Println("请求失败:", e0)
 					break
 				}
 
-				if len(dst[0:n]) != len(dst) {
-					CHUNK--
+				respBytes, _ := io.ReadAll(res0.Body)
+				res0.Body.Close()
+				log.Println("服务器返回:", string(respBytes))
+
+				if res0.StatusCode == 200 || res0.StatusCode == 201 {
+					oneDriveDelete(oneDrive, itemId)
+					break
+				} else if res0.StatusCode == 202 {
+					from = to
+				} else {
+					log.Printf("上传状态异常: %d\n", res0.StatusCode)
+					break
 				}
 
-				var to = off + CHUNK
-				if to > stat.Size() {
-					to = stat.Size() - 1
+				if to >= stat.Size() {
+					break
 				}
-				log.Printf("%d-%d", off, to)
-
-				_, res0 := oneDriveUpload(&oneDrive, off, to, stat.Size(), u, dst[0:n])
-				if res0 != nil {
-					if res0.StatusCode() == 200 || res.StatusCode() == 201 {
-						oneDriveDelete(&oneDrive, itemId)
-					}
-				}
-				off = off + CHUNK
 			}
+
 		})
 
 	})

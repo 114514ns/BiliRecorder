@@ -137,17 +137,19 @@ func TraceAudio(config RoomConfig, live Live, room int) {
 	var n = len(buffer)
 	for {
 		_, ok := m[room]
-		if !ok {
-			break
-		}
 		if typo == "onedrive" {
 			if m[room].End {
-				buffer = m[room].AudioBufferBytes
+				if ok {
+					buffer = m[room].AudioBufferBytes
+				} else {
+
+				}
 				oneDriveUpload(oneDrive, bytes, oneDrive.AudioChunkSize-1, oneDrive.AudioChunkSize, oneDriveUrl, buffer)
 				break
 			}
 		}
-		if int64(len(m[room].AudioBufferBytes)) > 1024*1024*4 {
+
+		if int64(len(m[room].AudioBufferBytes)) > 1024*768 {
 
 			buffer = m[room].AudioBufferBytes
 			n = len(buffer)
@@ -277,7 +279,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 		oneDrive = label.(*OneDriveStorageConfig)
 	}
 
-	go TraceAudio(roomConfig, live, room)
+	//go TraceAudio(roomConfig, live, room)
 	w := bufio.NewWriter(dst)
 	defer func() {
 		log.Printf("[%s] Exit\n", uname)
@@ -510,7 +512,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 				}
 				if roomConfig.Dst.(Storage).Type() == "onedrive" {
 					log.Printf("[%s] End", live.UName)
-					oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
+					_, r0 := oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
 
 					mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
 					b, _ := json.Marshal(offsetMap)
@@ -518,6 +520,22 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 					mapUrl = oneDriveCreate(oneDrive, oneDriveId, "metadata.json")
 					b, _ = json.Marshal(m[room])
 					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
+
+					if roomConfig.AutoConvert {
+						var obj0 map[string]interface{}
+						json.Unmarshal(r0.Body(), &obj0)
+						b0, _ := json.Marshal(offsetMap)
+						var link = oneDriveDownload(oneDrive, getString(obj0, "id"))
+						resty.New().R().
+							SetQueryParam("link", link).
+							SetFormData(map[string]string{
+								"mapping": string(b0),
+								"dir":     oneDriveId,
+								"id":      getString(obj0, "id"),
+							}).
+							SetQueryParam("fName", title+"-"+toString(int64(oneDriveChunk))+ext).
+							Post("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
+					}
 				}
 				done <- true
 			}
@@ -884,6 +902,7 @@ func main() {
 	log.SetOutput(multiWriter)
 	c := cron.New()
 	loadConfig()
+	getDstByLabel(config.GlobalConfig.DstLabel)
 	initResty()
 	go InitHTTP()
 

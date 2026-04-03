@@ -43,7 +43,7 @@ func oneDriveCreate(config *OneDriveStorageConfig, item string, fileName string)
 	fileName = strings.Replace(fileName, ":", "-", -1)
 	res, _ := oneDriveClient.R().SetHeader("authorization", "Bearer "+config.AccessToken).
 		SetHeader("Content-Type", "application/json").
-		SetBody(`"@microsoft.graph.conflictBehavior":""replace`).
+		SetBody(`{"@microsoft.graph.conflictBehavior":"replace"}`).
 		Post(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s:/%s:/createUploadSession", item, fileName))
 	var obj interface{}
 	json.Unmarshal(res.Body(), &obj)
@@ -232,5 +232,9 @@ func oneDriveDownload(config *OneDriveStorageConfig, item string) string {
 }
 
 func oneDriveDelete(config *OneDriveStorageConfig, item string) {
-	oneDriveClient.SetHeader("authorization", "Bearer "+config.AccessToken).R().Delete(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", item))
+	response, e0 := oneDriveClient.SetHeader("authorization", "Bearer "+config.AccessToken).R().Delete(fmt.Sprintf("https://graph.microsoft.com/v1.0/me/drive/items/%s", item))
+	if e0 != nil {
+		log.Println(e0)
+	}
+	log.Println(response.String())
 }

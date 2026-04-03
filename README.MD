@@ -13,6 +13,7 @@
 - 弹幕
 - webui
 - DOC
+- 语音转录
 
 # 配置示例
 ```json
@@ -37,8 +38,8 @@
     "AutoConvert": true //对于保存到OneDrive的情况，是否在每一块上传完成后自动转封装为mp4
   },
   "OverrideConfig": {},
-  "Port": 8099, //端口
-  "Livers": [
+  "Port": 8099, //api端口
+  "Livers": [ //要录制的主播。只需填写UID字段即可，UName会自动填充和修正
     {
       "UID": 1298779265,
       "UName": "灰泽满Hazel"
@@ -56,7 +57,7 @@
       "UName": "弥月Mizuki"
     }
   ],
-  "Storages": [
+  "Storages": [ //存储
     {
       "Label": "local",
       "Location": "/root/dst",
@@ -64,9 +65,9 @@
     },
     {
       "AccessToken": "*********",
-      "AudioChunkSize": 268435456,
-      "BufferChunk": 2,
-      "ChunkSize": 1073741884,
+      "AudioChunkSize": 268435456, //每一块音频的大小
+      "BufferChunk": 2, //积攒到多少个ts分片再上传。如果录制的主播较多，需适当调高这个值
+      "ChunkSize": 1073741884, //每一块视频的大小
       "ClientID": "***********",
       "ClientSecret": "*************",
       "Label": "onedrive",
@@ -77,6 +78,7 @@
       "RootID": "***************",
       "Type": "onedrive"
     }
+    
   ],
   "BiliProxy": "",
   "StreamProxy": "",
