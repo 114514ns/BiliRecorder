@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/asticode/go-astits"
+	"github.com/bytedance/sonic"
 )
 
 type JsonType struct {
@@ -44,6 +45,12 @@ func getBool(obj interface{}, path string) bool {
 	return getObject(obj, path, "bool").v
 }
 func getObject(obj interface{}, path string, typo string) JsonType {
+	if reflect.TypeOf(obj).Kind() == reflect.String {
+		sonic.Unmarshal([]byte(obj.(string)), &obj)
+	}
+	if reflect.TypeOf(obj).String() == "[]uint8" {
+		sonic.Unmarshal(obj.([]uint8), &obj)
+	}
 	var array = strings.Split(path, ".")
 	inner, ok := obj.(map[string]interface{})
 	if !ok {

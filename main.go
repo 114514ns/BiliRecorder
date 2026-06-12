@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	_ "net/http/pprof"
 	"net/url"
 	"os"
 	"os/exec"
@@ -21,9 +22,11 @@ import (
 	bili "github.com/114514ns/BiliClient"
 	"github.com/go-resty/resty/v2"
 	"github.com/google/uuid"
+	"github.com/grafana/pyroscope-go"
 	"github.com/jinzhu/copier"
 	"github.com/robfig/cron/v3"
 	"github.com/samber/lo"
+	pool2 "github.com/sourcegraph/conc/pool"
 )
 
 var last = make(map[string]string)
@@ -138,7 +141,7 @@ func TraceAudio(config RoomConfig, live Live, room int) {
 	for {
 		_, ok := m[room]
 		if typo == "onedrive" {
-			if m[room].End {
+			if m[room].End || !ok {
 				if ok {
 					buffer = m[room].AudioBufferBytes
 				} else {
@@ -185,7 +188,11 @@ func TraceAudio(config RoomConfig, live Live, room int) {
 	}
 
 }
+
 func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
+	time.Sleep(60 * time.Second)
+	var workerPool = pool2.New().WithMaxGoroutines(1)
+
 	label := getDstByLabel(config0.DstLabel)
 
 	if label == nil {
@@ -199,8 +206,6 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 	_ = copier.CopyWithOption(&roomConfig, &config0, copier.Option{
 		DeepCopy: true,
 	})
-
-	var offsetMap = make([]string, 0)
 
 	var chunk = 1 //ts分片个数
 
@@ -279,7 +284,9 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 		oneDrive = label.(*OneDriveStorageConfig)
 	}
 
-	//go TraceAudio(roomConfig, live, room)
+	go func() {
+		time.Sleep(time.Minute * 1)
+	}()
 	w := bufio.NewWriter(dst)
 	defer func() {
 		log.Printf("[%s] Exit\n", uname)
@@ -371,11 +378,12 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 
 			}
 		}
+		workerPool.Wait()
 	}()
 
-	var bytes int64 = 0  //用于标记OneDrive上传的字节数
-	var oneDriveUrl = "" //OneDrive上传url
-	pr, pw := io.Pipe()  //用于上传到Alist
+	var bytes int64 = 0 //用于标记OneDrive上传的字节数
+	var oneDriveSession *OneDriveSession
+	pr, pw := io.Pipe() //用于上传到Alist
 	if dstType == "alist" {
 		token = alistGetToken(roomConfig.Dst.(AlistStorageConfig))
 	}
@@ -388,7 +396,8 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 
 		oneDriveId = oneDriveMkDir(oneDrive, oneDrive.RootID, uname)
 		oneDriveId = oneDriveMkDir(oneDrive, oneDriveId, strings.ReplaceAll(begin, ":", "-"))
-		oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+		var oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+		oneDriveSession = NewOneDriveSession(oneDriveUrl, oneDrive, live, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext, ext, oneDrive.ChunkSize)
 	}
 	go func() {
 
@@ -489,9 +498,9 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 		case <-done:
 			return
 		case <-ticker.C:
-			str, err := biliDirectClient.Resty.R().Get(stream)
+			str, err := biliClient.Resty.R().Get(stream)
 
-			var retry = 1
+			var retry = 3
 			for {
 				if str.StatusCode() != 200 && retry > 0 {
 					stream = biliClient.GetLiveStream(room, container, false)
@@ -512,30 +521,13 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 				}
 				if roomConfig.Dst.(Storage).Type() == "onedrive" {
 					log.Printf("[%s] End", live.UName)
-					_, r0 := oneDriveUpload(oneDrive, bytes, oneDrive.ChunkSize, oneDrive.ChunkSize, oneDriveUrl, make([]byte, 16))
 
-					mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+".json")
-					b, _ := json.Marshal(offsetMap)
-					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
-					mapUrl = oneDriveCreate(oneDrive, oneDriveId, "metadata.json")
-					b, _ = json.Marshal(m[room])
+					mapUrl := oneDriveCreate(oneDrive, oneDriveId, "metadata.json")
+					b, _ := json.Marshal(m[room])
 					oneDriveUpload(oneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
 
-					if roomConfig.AutoConvert {
-						var obj0 map[string]interface{}
-						json.Unmarshal(r0.Body(), &obj0)
-						b0, _ := json.Marshal(offsetMap)
-						var link = oneDriveDownload(oneDrive, getString(obj0, "id"))
-						resty.New().R().
-							SetQueryParam("link", link).
-							SetFormData(map[string]string{
-								"mapping": string(b0),
-								"dir":     oneDriveId,
-								"id":      getString(obj0, "id"),
-							}).
-							SetQueryParam("fName", title+"-"+toString(int64(oneDriveChunk))+ext).
-							Post("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
-					}
+					oneDriveSession.Shutdown()
+
 				}
 				done <- true
 			}
@@ -577,9 +569,9 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 					_, ok := m0[s]
 					if !ok {
 
-						r, err1 := biliDirectClient.Resty.R().Get("https://" + u.Host + d + s)
+						r, err1 := biliDirectClient.Resty.R().SetDoNotParseResponse(true).Get("https://" + u.Host + d + s)
 						if r.StatusCode() != 200 {
-							r, err1 = client.R().Get("https://" + u.Host + d + s)
+							r, err1 = biliDirectClient.Resty.R().SetDoNotParseResponse(true).Get("https://" + u.Host + d + s)
 						}
 						if err1 != nil {
 							log.Println(err1)
@@ -651,128 +643,14 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 							pw.Write(r.Body())
 						}
 						if dstType == "onedrive" {
-							body := r.Body()
-							curBytes := bytes
-							curUrl := oneDriveUrl
-							chunkSize := oneDrive.ChunkSize
-							curOneDrive := oneDrive
-							m[room].BitRate = (float64(bytes) + float64(len(m[room].BufferBytes))) * 10.0 / time.Now().Sub(m[room].ChunkBegin).Seconds() / 1024.0 / 1024.0
-							if len(body) == 0 {
-								log.Printf("[%s] Length Error\n", uname)
-								log.Printf("[%s] "+r.Request.URL, uname)
-								log.Printf("[%s] %d", uname, r.StatusCode())
-							} else {
-								m[room].AudioBufferBytes = append(m[room].AudioBufferBytes, Extract(body)...)
-
-								var l0st = 0
-								if len(offsetMap) > 0 {
-									l0st = toInt(strings.Split(offsetMap[len(offsetMap)-1], ",")[1]) + 1
-								}
-								offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", l0st, l0st+len(body)-1))
-								if len(m[room].ChunkRecord)+1 == oneDriveChunk {
-									m[room].ChunkRecord = append(m[room].ChunkRecord, time.Now())
-								}
-								if oneDrive.BufferChunk >= 1 {
-									m[room].BufferBytes = append(m[room].BufferBytes, body...)
-									//log.Println("append,length=" + toString(int64(len(m[room].BufferBytes))))
-									if chunk%oneDrive.BufferChunk == 0 {
-										var to int64 = 0
-										var broder = false
-										if chunkSize-(curBytes+int64(len(m[room].BufferBytes))-1) <= 64*1024*1024 {
-											to = chunkSize - 1
-											broder = true
-										} else {
-											to = curBytes + int64(len(m[room].BufferBytes)) - 1
-										}
-										var t = oneDrive.Retry
-										for {
-											t--
-
-											code, r0 := oneDriveUpload(curOneDrive, curBytes, to, chunkSize, curUrl, m[room].BufferBytes)
-											log.Println(fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
-											if code != 416 {
-
-												m[room].OnedriveOffset = bytes
-												bytes = curBytes + int64(len(m[room].BufferBytes))
-												//offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
-
-												if broder {
-													m[room].ChunkBegin = time.Now()
-													oneDriveChunk++
-													oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
-													offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
-													bytes = 0
-													m[room].OnedriveOffset = 0
-													mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
-													b, _ := json.Marshal(offsetMap)
-													log.Println(oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b))
-
-													offsetMap = make([]string, 0)
-													if r0 == nil {
-														fmt.Println("r0 = nil")
-													}
-													if r0 != nil && !strings.Contains(r0.String(), "createdBy") {
-														fmt.Println(r0.String())
-													}
-													go func() {
-														time.Sleep(time.Second * 60)
-														if roomConfig.AutoConvert {
-															var obj0 map[string]interface{}
-															json.Unmarshal(r0.Body(), &obj0)
-															var link = oneDriveDownload(oneDrive, getString(obj0, "id"))
-															resty.New().R().
-																SetQueryParam("link", link).
-																SetFormData(map[string]string{
-																	"mapping": string(b),
-																	"dir":     oneDriveId,
-																	"id":      getString(obj0, "id"),
-																}).
-																SetQueryParam("fName", title+"-"+toString(int64(oneDriveChunk-1))+ext).
-																Post("http://127.0.0.1:" + toString(int64(config.Port)) + "/convert")
-														}
-													}()
-
-												}
-												break
-											} else {
-												bytes = m[room].OnedriveOffset
-											}
-											if t <= 0 {
-												break
-											}
-										}
-										m[room].BufferBytes = make([]byte, 0)
-									}
-								} else {
-									if chunkSize-curBytes <= 10*1024*1024 {
-										// 最后一块
-										oneDriveUpload(curOneDrive, curBytes, chunkSize-1, chunkSize, curUrl, body)
-										oneDriveChunk++
-										oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
-										offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, curBytes+int64(len(body))-1))
-										bytes = 0
-										m[room].OnedriveOffset = 0
-										fmt.Println("end")
-
-										mapUrl := oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk-1))+".json")
-
-										b, _ := json.Marshal(offsetMap)
-										oneDriveUpload(curOneDrive, 0, int64(len(b)-1), int64(len(b)), mapUrl, b)
-
-										offsetMap = make([]string, 0)
-
-									} else {
-										end := curBytes + int64(len(body)) - 1
-
-										if code, _ := oneDriveUpload(curOneDrive, curBytes, end, chunkSize, curUrl, body); code != 416 {
-											m[room].OnedriveOffset = bytes
-											bytes = curBytes + int64(len(body))
-											offsetMap = append(offsetMap, fmt.Sprintf("%d,%d", curBytes, end))
-										} else {
-											bytes = m[room].OnedriveOffset
-										}
-									}
-								}
+							bytes += r.RawResponse.ContentLength
+							oneDriveSession.Append(r.RawBody())
+							if oneDrive.ChunkSize-bytes < 1024*1024*15 {
+								oneDriveChunk++
+								oneDriveSession.Shutdown()
+								bytes = 0
+								var oneDriveUrl = oneDriveCreate(oneDrive, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext)
+								oneDriveSession = NewOneDriveSession(oneDriveUrl, oneDrive, live, oneDriveId, title+"-"+toString(int64(oneDriveChunk))+ext, ext, oneDrive.ChunkSize)
 							}
 						}
 					}
@@ -783,6 +661,7 @@ func TraceStream(client *resty.Client, room int, config0 RoomConfig) {
 			}
 		}
 	}
+
 }
 
 var m = make(map[int]*RoomStatus)
@@ -824,17 +703,17 @@ func RefreshStatus0(id []int64) {
 	for _, i := range m0["_ts_rpc_return_"].(map[string]interface{})["data"].(map[string]interface{}) {
 		var room = toInt(getString(i, "roomId"))
 		if getString(i, "liveStatus") == "1" {
-			//mutex.Lock()
+			mutex.Lock()
 			_, ok := m[room]
 			if !ok {
 				m[room] = &RoomStatus{} // 先在锁内写入占位
 				m[room].AudioBufferBytes = make([]byte, 0)
-				//mutex.Unlock()
+				mutex.Unlock()
 				go func() {
 					TraceStream(biliClient.Resty, room, config.GlobalConfig)
 				}()
 			} else {
-				//mutex.Unlock()
+				mutex.Unlock()
 			}
 		}
 		if getString(i, "liveStatus") == "0" {
@@ -898,6 +777,22 @@ var logFile, err = os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0766)
 
 func main() {
 
+	go func() {
+		http.ListenAndServe("0.0.0.0:6060", nil)
+	}()
+	pyroscope.Start(pyroscope.Config{
+		ApplicationName: "BiliRecorder",        // 在监控页面上显示的程序名称
+		ServerAddress:   "http://vtb.cat:4040", // Pyroscope 服务的地址（如果是远程服务器，请修改为对应 IP）
+		//Logger:          pyroscope.StandardLogger(os.Stdout), // 打印 agent 日志
+		ProfileTypes: []pyroscope.ProfileType{
+			pyroscope.ProfileCPU,          // 监控 CPU
+			pyroscope.ProfileAllocObjects, // 监控累计分配的对象数
+			pyroscope.ProfileAllocSpace,   // 监控累计分配的内存空间（查找垃圾源）
+			pyroscope.ProfileInuseObjects, // 监控当前持有的对象数
+			pyroscope.ProfileInuseSpace,   // 监控当前占用的内存空间（查找内存泄漏）
+		},
+	})
+
 	multiWriter := io.MultiWriter(os.Stdout, logFile)
 	log.SetOutput(multiWriter)
 	c := cron.New()
@@ -923,6 +818,16 @@ func main() {
 			return item.UID
 		}))
 	})
+
+	if config.StatusPushURL != "" {
+		go func() {
+			var c0 = resty.New()
+			for {
+				time.Sleep(time.Second * 30)
+				c0.R().Get(config.StatusPushURL)
+			}
+		}()
+	}
 	c.Start()
 	select {}
 

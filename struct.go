@@ -10,11 +10,22 @@ type LocalStorageConfig struct {
 	ForwardTo string
 }
 type AlistStorageConfig struct {
-	Label   string
-	Server  string
-	User    string //Alist
-	Pass    string
-	RootDir string
+	Label       string
+	Server      string
+	User        string //Alist
+	Pass        string
+	RootDir     string
+	ForwardTo   string
+	StreamProxy string
+}
+
+type CMStorageConfig struct {
+	Label       string
+	RootDir     string
+	Cookie      string
+	ForwardTo   string
+	StreamProxy string
+	instance    *CMDrive
 }
 
 type S3StorageConfig struct {
@@ -36,6 +47,8 @@ type OneDriveStorageConfig struct {
 	AudioChunkSize int64
 	BufferChunk    int
 	Retry          int
+	ForwardTo      string
+	AutoConvert    bool //每一块上传完之后是否自动转换。当ForwardTo为空时，原地存储。不为空时上传到另一个地方。
 }
 type Storage interface {
 	Type() string
@@ -53,6 +66,9 @@ func (s AlistStorageConfig) Type() string {
 func (s OneDriveStorageConfig) Type() string {
 	return "onedrive"
 }
+func (s CMStorageConfig) Type() string {
+	return "139"
+}
 
 type RoomConfig struct {
 	ReEncoding       bool   //重新编码
@@ -67,7 +83,7 @@ type RoomConfig struct {
 	EnableTranscribe bool //转录
 	AudioCodec       string
 	Container        string //容器格式，ts/fmp4
-	AutoConvert      bool   //仅OneDrive dst有效。每个分块上传完成后是否自动开始转换
+
 }
 
 type Liver struct {
@@ -87,6 +103,8 @@ type Config struct {
 	BiliProxy      string //请求b站api的代理
 	StreamProxy    string
 	OneDriveProxy  string
+
+	StatusPushURL string //Uptime Kuma
 }
 
 type Live struct {
@@ -151,9 +169,24 @@ func getDstByLabel(s string) Storage {
 					RootDir:        getString(i, "RootDir"),
 					RootID:         getString(i, "RootID"),
 					BufferChunk:    getInt(i, "BufferChunk"),
+					AutoConvert:    getBool(i, "AutoConvert"),
+					ForwardTo:      getString(i, "ForwardTo"),
 				}
 				cacheDst[s] = storage
 				oneDriveInit(storage)
+				return storage
+			}
+			if getString(i, "Type") == "139" {
+				var storage = &CMStorageConfig{
+					Label:       getString(i, "Label"),
+					RootDir:     getString(i, "RootDir"),
+					Cookie:      getString(i, "Cookie"),
+					StreamProxy: getString(i, "StreamProxy"),
+				}
+
+				storage.instance = NewCMDrive(storage.Cookie)
+				storage.instance.StreamProxy = storage.StreamProxy
+				cacheDst[s] = storage
 				return storage
 			}
 			return nil
